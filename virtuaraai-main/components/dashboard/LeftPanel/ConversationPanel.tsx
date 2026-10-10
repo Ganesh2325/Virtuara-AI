@@ -6,6 +6,7 @@ import { Send, Mic, MicOff, RefreshCw, Brain, MessageSquare, Briefcase } from "l
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { getSubjects, getObjectives, createSession, beginSession, submitTurn, saveMessage, completeSession } from "@/lib/api";
+import { useAria } from "@/components/aria/AriaProvider";
 
 interface Message {
   id: number;
@@ -15,11 +16,6 @@ interface Message {
 }
 
 type Mode = "chat" | "quiz";
-
-function getSpeechRecognition(): (new () => any) | null {
-  if (typeof window === "undefined") return null;
-  return (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition ?? null;
-}
 
 function nowStr() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -82,14 +78,14 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   const router = useRouter();
   const subject = searchParams?.get("subject") ?? "General Learning";
   const accessToken = (session as any)?.accessToken as string | undefined;
+  const aria = useAria();
+  const listening = aria.avatarState === "listening" || aria.avatarState === "processing";
 
   const [mode, setMode] = useState<Mode>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [listening, setListening] = useState(false);
   const [error, setError] = useState("");
-  const recognitionRef = useRef<any>(null);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [subjectId, setSubjectId] = useState<string | null>(null);
@@ -128,7 +124,7 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     setError("");
     setMessages([makeWelcome(mode)]);
 
-    if (mode !== "chat" || !accessToken || !subject || subject === "General Learning") {
+    if (!accessToken || !subject || subject === "General Learning") {
       return;
     }
 
@@ -143,7 +139,7 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
         const objective = objectives.find((item) => item.slug === requested) ?? objectives[0];
         if (!objective || cancelled) return;
         const sess = await createSession(
-          { subject: match.id, objective: objective.id, session_type: "tutor" },
+          { subject: match.id, objective: objective.id, session_type: mode === "quiz" ? "quiz" : "tutor" },
           accessToken
         );
         const started = await beginSession(sess.id, accessToken);
@@ -169,51 +165,34 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
 
-  // Stop recognition when component unmounts
   useEffect(() => {
-    return () => { recognitionRef.current?.stop(); };
-  }, []);
+    aria.setTask({
+      kind: mode === "quiz" ? "quiz" : teachingActive ? "learning" : "general",
+      subject,
+      learningSessionId: teachingActive ? sessionId : null,
+    });
+    return () => aria.clearTask(mode === "quiz" ? "quiz" : "learning");
+  }, [aria.setTask, aria.clearTask, mode, subject, sessionId, teachingActive]);
 
-  const toggleListening = useCallback(() => {
-    const SR = getSpeechRecognition();
-    if (!SR) {
-      setError("Voice input requires Chrome or Edge. Please switch browsers.");
-      return;
-    }
+  useEffect(() => {
+    return aria.registerHandler((turn) => {
+      if (turn.context !== "learning" && turn.context !== "quiz") return;
+      const heard: Message = { id: Date.now(), role: "user", content: turn.heard, timestamp: nowStr() };
+      const replyText = turn.spokenText ?? (typeof turn.body.message === "string" ? turn.body.message : "Aria did not produce a reply.");
+      const reply: Message = { id: Date.now() + 1, role: "ai", content: replyText, timestamp: nowStr() };
+      setMessages((prev) => [...prev, heard, reply]);
+      if (!turn.ok) setError(replyText);
+    });
+  }, [aria.registerHandler]);
 
+  const toggleListening = () => {
     if (listening) {
-      recognitionRef.current?.stop();
-      setListening(false);
+      aria.stopListening();
       return;
     }
-
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    rec.continuous = false;
-
-    rec.onstart = () => setListening(true);
-
-    rec.onresult = (event: any) => {
-      const transcript = Array.from(event.results as any[])
-        .map((r: any) => r[0].transcript)
-        .join("");
-      setInput(transcript);
-      if (event.results[event.results.length - 1].isFinal) {
-        setListening(false);
-      }
-    };
-
-    rec.onerror = () => {
-      setListening(false);
-      setError("Microphone error. Check your browser permissions and try again.");
-    };
-
-    rec.onend = () => setListening(false);
-
-    recognitionRef.current = rec;
-    rec.start();
-  }, [listening]);
+    if (!aria.active) aria.start();
+    else aria.listen();
+  };
 
   const ensureSession = async () => {
     if (sessionId || !accessToken) return sessionId;
@@ -233,11 +212,7 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     const text = input.trim();
     if (!text || isTyping || quizDone) return;
 
-    // Stop voice if still running
-    if (listening) {
-      recognitionRef.current?.stop();
-      setListening(false);
-    }
+    if (listening) aria.stopListening();
 
     const userMsg: Message = { id: Date.now(), role: "user", content: text, timestamp: nowStr() };
     const updatedMessages = [...messages, userMsg];
@@ -275,6 +250,7 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
         const aiMsg: Message = { id: Date.now() + 1, role: "ai", content: result.body.response_text, timestamp: nowStr() };
         setMessages((prev) => [...prev, aiMsg]);
         onAISpeak?.(result.body.response_text);
+        if (aria.active) aria.speak(result.body.response_text);
       } catch (err: any) {
         setError(err.message ?? "Something went wrong. Please try again.");
       } finally {

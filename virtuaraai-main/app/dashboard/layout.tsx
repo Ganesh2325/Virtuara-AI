@@ -8,6 +8,7 @@ import { Bell, ChevronDown, LogOut, Settings, User as UserIcon, LayoutDashboard,
 import Link from "next/link";
 import NotificationDropdown from "@/components/dashboard/NotificationDropdown";
 import { getSessionStats } from "@/lib/api";
+import { AriaProvider } from "@/components/aria/AriaProvider";
 
 export default function DashboardLayout({
   children,
@@ -204,7 +205,7 @@ export default function DashboardLayout({
 
       {/* PAGE CONTENT */}
       <main className="flex-1 overflow-hidden relative">
-        {children}
+        <AriaProvider>{children}</AriaProvider>
       </main>
 
     </div>

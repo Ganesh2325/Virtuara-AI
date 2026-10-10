@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
+import { useAria } from "@/components/aria/AriaProvider";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const DURATIONS = [10, 15, 20, 25, 30];
@@ -47,6 +48,7 @@ async function api(path: string, token: string, options: RequestInit = {}) {
 export default function ResumeInterview() {
   const { data: session } = useSession();
   const token = (session as { accessToken?: string } | null)?.accessToken;
+  const aria = useAria();
   const [file, setFile] = useState<File | null>(null);
   const [resume, setResume] = useState<ResumeState | null>(null);
   const [role, setRole] = useState("Backend engineer");
@@ -67,6 +69,22 @@ export default function ResumeInterview() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [interview]);
+
+  useEffect(() => {
+    if (!interview?.id) return;
+    aria.setTask({ kind: "interview", interviewSessionId: interview.id });
+    return () => aria.clearTask("interview");
+  }, [aria.setTask, aria.clearTask, interview?.id]);
+
+  useEffect(() => {
+    return aria.registerHandler((turn) => {
+      if (turn.context !== "interview") return;
+      const body = turn.body as InterviewState;
+      setInterview(body);
+      if (body.report) setReport(body.report);
+      if (!turn.ok) setError(typeof turn.body.message === "string" ? turn.body.message : "The spoken answer was not saved.");
+    });
+  }, [aria.registerHandler]);
 
   useEffect(() => {
     if (!token || !resume || resume.status !== "processing") return;
@@ -225,7 +243,16 @@ export default function ResumeInterview() {
             </p>
             <p className="text-[16px] leading-relaxed text-text-primary whitespace-pre-wrap">{prompt}</p>
             <textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows={4} className="w-full px-3 py-2 rounded-xl border border-border-default bg-bg-overlay" placeholder="Type your answer" />
-            <div className="flex gap-3">
+            <div className="flex gap-3 flex-wrap">
+              <button
+                onClick={() => {
+                  if (!aria.active) aria.start();
+                  if (prompt) aria.speak(prompt);
+                }}
+                className="px-4 py-2 rounded-xl border border-border-subtle text-[13px] font-bold"
+              >
+                {aria.avatarState === "listening" ? "Listening" : "Speak with Aria"}
+              </button>
               <button onClick={send} disabled={busy || !answer.trim()} className="px-4 py-2 rounded-xl bg-text-gold-deep text-white text-[13px] font-bold disabled:opacity-40">
                 Send answer
               </button>
