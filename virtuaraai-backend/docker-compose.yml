@@ -32,13 +32,14 @@ services:
       - .:/app
       - media_data:/app/media
     ports:
-      - "8000:8000"
+      - "8001:8000"
     env_file:
       - .env
     environment:
       DATABASE_URL: postgres://virtuara_user:virtuara_pass@db:5432/virtuara_db
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
     depends_on:
       db:
         condition: service_healthy
@@ -50,12 +51,14 @@ services:
     command: celery -A config worker -l info
     volumes:
       - .:/app
+      - media_data:/app/media
     env_file:
       - .env
     environment:
       DATABASE_URL: postgres://virtuara_user:virtuara_pass@db:5432/virtuara_db
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
     depends_on:
       db:
         condition: service_healthy
