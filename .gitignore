@@ -1,0 +1,29 @@
+# Dependencies and build output
+node_modules/
+.next/
+out/
+dist/
+build/
+staticfiles/
+media/
+
+# Python environments
+venv/
+.venv/
+.venv-win/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets and local env
+.env
+.env*.local
+
+# Tooling
+.DS_Store
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+*.tsbuildinfo
+next-env.d.ts
