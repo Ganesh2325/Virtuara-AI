@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Bell, ChevronDown, LogOut, Settings, User as UserIcon, LayoutDashboard, History, BookOpen, Trophy, ChevronRight, Briefcase } from "lucide-react";
@@ -17,11 +17,15 @@ export default function DashboardLayout({
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const currentSubject = searchParams.get("subject") || "Mathematics";
+  const [currentSubject, setCurrentSubject] = useState("Mathematics");
   const { data: session, status } = useSession();
   const [dropOpen, setDropOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+
+  useEffect(() => {
+    const selected = new URLSearchParams(window.location.search).get("subject");
+    setCurrentSubject(selected || "Mathematics");
+  }, [pathname]);
 
   useEffect(() => {
     // ── AUTH CHECK ────────────────────────────────
@@ -38,7 +42,7 @@ export default function DashboardLayout({
       const key = `onboarding_${email}`;
       if (localStorage.getItem(key) === "true") return; // already done
 
-      const token = (session as any)?.accessToken as string | undefined;
+      const token = (session as { accessToken?: string } | null)?.accessToken;
       if (!token) return; // token not ready yet — wait for next render
 
       getSessionStats(token)

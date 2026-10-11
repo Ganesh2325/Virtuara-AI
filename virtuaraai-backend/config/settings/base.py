@@ -119,6 +119,9 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": (
         "rest_framework.renderers.JSONRenderer",
     ),
+    "DEFAULT_THROTTLE_RATES": {
+        "voice_turn": env("VOICE_TURN_RATE_LIMIT", default="30/min"),
+    },
 }
 
 # ── JWT ───────────────────────────────────────────────────────

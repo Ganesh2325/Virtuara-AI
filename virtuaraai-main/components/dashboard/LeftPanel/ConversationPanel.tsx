@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Send, Mic, MicOff, RefreshCw, Brain, MessageSquare, Briefcase } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { getSubjects, getObjectives, createSession, beginSession, submitTurn, saveMessage, completeSession } from "@/lib/api";
+import { getSubjects, getObjectives, createSession, beginSession, submitTurn, completeSession } from "@/lib/api";
 import { useAria } from "@/components/aria/AriaProvider";
 
 interface Message {
@@ -19,6 +19,10 @@ type Mode = "chat" | "quiz";
 
 function nowStr() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true });
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Something went wrong. Please try again.";
 }
 
 function MessageBubble({ msg }: { msg: Message }) {
@@ -77,9 +81,10 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   const searchParams = useSearchParams();
   const router = useRouter();
   const subject = searchParams?.get("subject") ?? "General Learning";
-  const accessToken = (session as any)?.accessToken as string | undefined;
+  const accessToken = (session as { accessToken?: string } | null)?.accessToken;
   const aria = useAria();
-  const listening = aria.avatarState === "listening" || aria.avatarState === "processing";
+  const { setTask, clearTask, registerHandler } = aria;
+  const listening = aria.avatarState === "listening";
 
   const [mode, setMode] = useState<Mode>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -166,24 +171,32 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   }, [messages, isTyping]);
 
   useEffect(() => {
-    aria.setTask({
+    if (aria.avatarState !== "processing") setIsTyping(false);
+  }, [aria.avatarState]);
+
+  useEffect(() => {
+    setTask({
       kind: mode === "quiz" ? "quiz" : teachingActive ? "learning" : "general",
       subject,
       learningSessionId: teachingActive ? sessionId : null,
     });
-    return () => aria.clearTask(mode === "quiz" ? "quiz" : "learning");
-  }, [aria.setTask, aria.clearTask, mode, subject, sessionId, teachingActive]);
+    return () => clearTask(mode === "quiz" ? "quiz" : teachingActive ? "learning" : "general");
+  }, [setTask, clearTask, mode, subject, sessionId, teachingActive]);
 
   useEffect(() => {
-    return aria.registerHandler((turn) => {
-      if (turn.context !== "learning" && turn.context !== "quiz") return;
-      const heard: Message = { id: Date.now(), role: "user", content: turn.heard, timestamp: nowStr() };
+    return registerHandler((turn) => {
+      if (!["general", "learning", "quiz"].includes(turn.context)) return;
       const replyText = turn.spokenText ?? (typeof turn.body.message === "string" ? turn.body.message : "Aria did not produce a reply.");
       const reply: Message = { id: Date.now() + 1, role: "ai", content: replyText, timestamp: nowStr() };
-      setMessages((prev) => [...prev, heard, reply]);
+      setMessages((prev) => {
+        if (turn.inputModality === "text") return [...prev, reply];
+        const heard: Message = { id: Date.now(), role: "user", content: turn.heard, timestamp: nowStr() };
+        return [...prev, heard, reply];
+      });
       if (!turn.ok) setError(replyText);
+      setIsTyping(false);
     });
-  }, [aria.registerHandler]);
+  }, [registerHandler]);
 
   const toggleListening = () => {
     if (listening) {
@@ -221,10 +234,12 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     setIsTyping(true);
     setError("");
 
-    const sid = await ensureSession();
-    if (sid && accessToken && !teachingActive) {
-      saveMessage(sid, { role: "user", content: text }, accessToken).catch(() => {});
+    if (!teachingActive && mode === "chat") {
+      aria.sendText(text);
+      return;
     }
+
+    const sid = await ensureSession();
 
     if (teachingActive && sid && accessToken) {
       try {
@@ -251,50 +266,16 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
         setMessages((prev) => [...prev, aiMsg]);
         onAISpeak?.(result.body.response_text);
         if (aria.active) aria.speak(result.body.response_text);
-      } catch (err: any) {
-        setError(err.message ?? "Something went wrong. Please try again.");
+      } catch (err: unknown) {
+        setError(errorMessage(err));
       } finally {
         setIsTyping(false);
       }
       return;
     }
 
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: updatedMessages.map((m) => ({ role: m.role, content: m.content })),
-          subject,
-          level: "intermediate",
-          mode,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "AI service error");
-
-      const aiMsg: Message = { id: Date.now() + 1, role: "ai", content: data.response, timestamp: nowStr() };
-      setMessages((prev) => [...prev, aiMsg]);
-      onAISpeak?.(data.response);
-
-      if (sid && accessToken) {
-        saveMessage(sid, { role: "assistant", content: data.response }, accessToken).catch(() => {});
-      }
-
-      if (data.quizScore !== null && data.quizTotal !== null) {
-        setQuizScore(data.quizScore);
-        setQuizDone(true);
-        if (sid && accessToken) {
-          const pct = Math.round((data.quizScore / data.quizTotal) * 100);
-          completeSession(sid, { score: pct, notes: `Quiz: ${data.quizScore}/${data.quizTotal}` }, accessToken).catch(() => {});
-        }
-      }
-    } catch (err: any) {
-      setError(err.message ?? "Something went wrong. Please try again.");
-    } finally {
-      setIsTyping(false);
-    }
+    setError("This quiz needs a published learning objective before it can accept answers.");
+    setIsTyping(false);
   };
 
   const resetChat = async () => {
@@ -306,6 +287,7 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     setQuizScore(0);
     setQuizDone(false);
     setError("");
+    aria.resetConversation();
     setBootKey((key) => key + 1);
   };
 

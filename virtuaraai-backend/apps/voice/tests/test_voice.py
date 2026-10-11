@@ -2,10 +2,14 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from rest_framework.test import APITestCase
+from unittest.mock import patch
 
 from apps.accounts.models import UserProfile
+from apps.sessions.providers import ProviderResult, ProviderTimeout
 from apps.sessions.models import MasteryEvidence
 from apps.subjects.models import LearningObjective, LearningResource, Module, PracticeQuestion, Subject
+from apps.voice.general import MAX_CONTEXT_TURNS
+from apps.voice.models import GeneralConversation, GeneralTurn, ProviderUsage
 
 User = get_user_model()
 
@@ -125,6 +129,184 @@ class VoiceRuntimeTests(APITestCase):
         self.assertIsNone(general.data["spoken_text"])
         self.assertEqual(general.data["heard"], "Explain gravity")
         self.assertEqual(MasteryEvidence.objects.count(), before)
+        self.assertEqual(GeneralTurn.objects.count(), 0)
+
+    @patch("apps.voice.general.get_text_provider")
+    def test_general_conversation_is_durable_bounded_and_idempotent(self, provider_factory):
+        class Provider:
+            configured = True
+            name = "test-provider"
+            model = "test-model"
+            calls = []
+
+            def generate_chat(self, messages, max_tokens=500):
+                self.calls.append(messages)
+                return ProviderResult(
+                    text="Gravity attracts masses.",
+                    provider=self.name,
+                    model=self.model,
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                    latency_ms=12,
+                )
+
+        provider = Provider()
+        provider_factory.return_value = provider
+        first = self.client.post(
+            "/api/v1/voice/turns/",
+            {
+                "context": "general",
+                "subject": "Physics",
+                "content": "Explain gravity",
+                "client_turn_id": "general-success-1",
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(first.data["spoken_text"], "Gravity attracts masses.")
+        conversation_id = first.data["conversation_id"]
+
+        duplicate = self.client.post(
+            "/api/v1/voice/turns/",
+            {
+                "context": "general",
+                "subject": "Physics",
+                "conversation_id": conversation_id,
+                "content": "Explain gravity",
+                "client_turn_id": "general-success-1",
+            },
+            format="json",
+        )
+        self.assertTrue(duplicate.data["duplicate"])
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(GeneralTurn.objects.count(), 1)
+        self.assertEqual(ProviderUsage.objects.filter(status="success").count(), 1)
+
+        for index in range(MAX_CONTEXT_TURNS + 3):
+            GeneralTurn.objects.create(
+                conversation_id=conversation_id,
+                client_turn_id=f"seed-{index}",
+                user_text=f"user-{index}",
+                assistant_text=f"assistant-{index}",
+                provider="test",
+                model="test",
+            )
+        follow_up = self.client.post(
+            "/api/v1/voice/turns/",
+            {
+                "context": "general",
+                "subject": "Physics",
+                "conversation_id": conversation_id,
+                "content": "What did I ask before?",
+                "client_turn_id": "general-success-2",
+            },
+            format="json",
+        )
+        self.assertEqual(follow_up.status_code, 200)
+        supplied = provider.calls[-1]
+        self.assertLessEqual(
+            len([item for item in supplied if item["role"] == "assistant"]),
+            MAX_CONTEXT_TURNS,
+        )
+        self.assertEqual(supplied[-1]["content"], "What did I ask before?")
+
+        changed = self.client.post(
+            "/api/v1/voice/turns/",
+            {
+                "context": "general",
+                "subject": "Chemistry",
+                "conversation_id": conversation_id,
+                "content": "Change topic",
+                "client_turn_id": "general-changed",
+            },
+            format="json",
+        )
+        self.assertEqual(changed.status_code, 409)
+
+    @patch("apps.voice.general.get_text_provider")
+    def test_general_response_streams_and_is_persisted(self, provider_factory):
+        class Provider:
+            configured = True
+            name = "stream-provider"
+            model = "stream-model"
+
+            def stream_chat(self, messages, max_tokens=500):
+                yield "First "
+                yield "visible text."
+                return ProviderResult(
+                    text="First visible text.",
+                    provider=self.name,
+                    model=self.model,
+                    latency_ms=9,
+                )
+
+        provider_factory.return_value = Provider()
+        response = self.client.post(
+            "/api/v1/voice/general-stream/",
+            {
+                "subject": "Physics",
+                "content": "Explain inertia",
+                "client_turn_id": "stream-1",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = b"".join(response.streaming_content).decode()
+        self.assertIn('"type":"delta","text":"First "', body)
+        self.assertIn('"type":"done"', body)
+        turn = GeneralTurn.objects.get(client_turn_id="stream-1")
+        self.assertEqual(turn.assistant_text, "First visible text.")
+        self.assertEqual(ProviderUsage.objects.get(correlation_id="stream-1").latency_ms, 9)
+
+    @patch("apps.voice.general.get_text_provider")
+    def test_provider_timeout_does_not_create_a_turn(self, provider_factory):
+        class Provider:
+            configured = True
+            name = "slow-provider"
+            model = "slow-model"
+
+            def generate_chat(self, messages, max_tokens=500):
+                raise ProviderTimeout(self.name, "The AI provider timed out.")
+
+        provider_factory.return_value = Provider()
+        response = self.client.post(
+            "/api/v1/voice/turns/",
+            {
+                "context": "general",
+                "content": "Hello",
+                "client_turn_id": "timeout-1",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["error"], "timeout")
+        self.assertEqual(GeneralTurn.objects.count(), 0)
+        self.assertEqual(ProviderUsage.objects.filter(status="timeout").count(), 1)
+
+    @patch("apps.voice.general.get_text_provider")
+    def test_conversation_history_is_owner_only(self, provider_factory):
+        class Provider:
+            configured = True
+            name = "test"
+            model = "test"
+
+            def generate_chat(self, messages, max_tokens=500):
+                return ProviderResult(text="Answer", provider="test", model="test")
+
+        provider_factory.return_value = Provider()
+        created = self.client.post(
+            "/api/v1/voice/turns/",
+            {"context": "general", "content": "Private", "client_turn_id": "private-1"},
+            format="json",
+        )
+        conversation_id = created.data["conversation_id"]
+        own = self.client.get(f"/api/v1/voice/conversations/{conversation_id}/")
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(own.data["turns"][0]["user_text"], "Private")
+
+        self.client.force_authenticate(self.other)
+        hidden = self.client.get(f"/api/v1/voice/conversations/{conversation_id}/")
+        self.assertEqual(hidden.status_code, 404)
 
     def test_spoken_interview_answer_stays_on_the_interview(self):
         upload = SimpleUploadedFile("resume.txt", RESUME.encode(), content_type="text/plain")

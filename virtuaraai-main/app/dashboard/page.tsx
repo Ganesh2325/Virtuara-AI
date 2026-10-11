@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useSession } from "next-auth/react";
 import ConversationPanel from "@/components/dashboard/LeftPanel/ConversationPanel";
 import AvatarStream from "@/components/dashboard/CenterPanel/AvatarStream";
@@ -13,7 +13,7 @@ type Tab = (typeof tabs)[number];
 
 export default function DashboardPage() {
   const { data: session } = useSession();
-  const userName = (session as any)?.user?.name?.split(" ")?.[0] ?? "Learner";
+  const userName = session?.user?.name?.split(" ")?.[0] ?? "Learner";
 
   const [activeTab, setActiveTab] = useState<Tab>("Mentor");
   const [speaking, setSpeaking] = useState(true);
@@ -24,7 +24,9 @@ export default function DashboardPage() {
       {/* ── 3-COLUMN GRID (desktop) ──────────────────── */}
       <div className="hidden lg:grid flex-1 overflow-hidden" style={{ gridTemplateColumns: "1fr 2fr 1fr" }}>
         <motion.div initial={{ opacity: 0, x: -30 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.5 }} className="overflow-hidden bg-bg-surface border-r border-border-subtle relative z-10 shadow-sm">
-          <ConversationPanel onAISpeak={() => setSpeaking(true)} />
+          <Suspense fallback={<div className="h-full bg-bg-surface" />}>
+            <ConversationPanel onAISpeak={() => setSpeaking(true)} />
+          </Suspense>
         </motion.div>
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.15 }} className="overflow-hidden bg-bg-page relative z-0">
           <AvatarStream speaking={speaking} onEndSession={() => setShowSummary(true)} />
@@ -47,7 +49,11 @@ export default function DashboardPage() {
       {/* ── MOBILE TABS ──────────────────────────────── */}
       <div className="flex-1 overflow-hidden lg:hidden flex flex-col bg-bg-page">
         <div className="flex-1 overflow-hidden">
-          {activeTab === "Chat" && <ConversationPanel />}
+          {activeTab === "Chat" && (
+            <Suspense fallback={<div className="h-full bg-bg-surface" />}>
+              <ConversationPanel />
+            </Suspense>
+          )}
           {activeTab === "Mentor" && (
             <div className="relative h-full">
               <AvatarStream speaking={speaking} onEndSession={() => setShowSummary(true)} />

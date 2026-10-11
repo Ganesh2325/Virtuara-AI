@@ -49,6 +49,7 @@ export default function ResumeInterview() {
   const { data: session } = useSession();
   const token = (session as { accessToken?: string } | null)?.accessToken;
   const aria = useAria();
+  const { setTask, clearTask, registerHandler } = aria;
   const [file, setFile] = useState<File | null>(null);
   const [resume, setResume] = useState<ResumeState | null>(null);
   const [role, setRole] = useState("Backend engineer");
@@ -72,19 +73,19 @@ export default function ResumeInterview() {
 
   useEffect(() => {
     if (!interview?.id) return;
-    aria.setTask({ kind: "interview", interviewSessionId: interview.id });
-    return () => aria.clearTask("interview");
-  }, [aria.setTask, aria.clearTask, interview?.id]);
+    setTask({ kind: "interview", interviewSessionId: interview.id });
+    return () => clearTask("interview");
+  }, [setTask, clearTask, interview?.id]);
 
   useEffect(() => {
-    return aria.registerHandler((turn) => {
+    return registerHandler((turn) => {
       if (turn.context !== "interview") return;
       const body = turn.body as InterviewState;
       setInterview(body);
       if (body.report) setReport(body.report);
       if (!turn.ok) setError(typeof turn.body.message === "string" ? turn.body.message : "The spoken answer was not saved.");
     });
-  }, [aria.registerHandler]);
+  }, [registerHandler]);
 
   useEffect(() => {
     if (!token || !resume || resume.status !== "processing") return;

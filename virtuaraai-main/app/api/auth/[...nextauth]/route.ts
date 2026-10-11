@@ -1,8 +1,44 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
+import type { JWT } from "next-auth/jwt";
 import GoogleProvider from "next-auth/providers/google";
 import CredentialsProvider from "next-auth/providers/credentials";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+function jwtExpiry(token?: string) {
+  if (!token) return 0;
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+    return Number(payload.exp ?? 0) * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+async function refreshBackendToken(token: JWT): Promise<JWT> {
+  if (!token.refreshToken) {
+    return { ...token, accessToken: undefined, authError: "BackendSessionUnavailable" };
+  }
+  try {
+    const response = await fetch(`${API_URL}/api/v1/auth/token/refresh/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh: token.refreshToken }),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("refresh_failed");
+    const data = await response.json();
+    return {
+      ...token,
+      accessToken: data.access,
+      refreshToken: data.refresh ?? token.refreshToken,
+      accessTokenExpires: jwtExpiry(data.access),
+      authError: undefined,
+    };
+  } catch {
+    return { ...token, accessToken: undefined, authError: "RefreshAccessTokenError" };
+  }
+}
 
 const authOptions: NextAuthOptions = {
   providers: [
@@ -78,8 +114,10 @@ const authOptions: NextAuthOptions = {
         token.name = user.name;
         token.email = user.email;
         token.picture = user.image ?? token.picture;
-        token.accessToken = (user as any).accessToken;
-        token.refreshToken = (user as any).refreshToken;
+        token.accessToken = user.accessToken;
+        token.refreshToken = user.refreshToken;
+        token.accessTokenExpires = jwtExpiry(user.accessToken);
+        token.authError = undefined;
       }
       // Google OAuth: no Django tokens on first sign-in (handle separately if needed)
       if (account?.provider === "google" && profile) {
@@ -87,7 +125,10 @@ const authOptions: NextAuthOptions = {
         token.name = (p.name ?? p.given_name ?? token.name) as string;
         token.picture = (p.picture ?? token.picture) as string | undefined;
       }
-      return token;
+      if (!token.accessToken) return token;
+      const expires = token.accessTokenExpires || jwtExpiry(token.accessToken);
+      if (expires > Date.now() + 30_000) return token;
+      return refreshBackendToken(token);
     },
 
     async session({ session, token }) {
@@ -97,8 +138,9 @@ const authOptions: NextAuthOptions = {
         session.user.image = (token.picture as string) ?? session.user.image;
       }
       // Expose Django JWT to client
-      (session as any).accessToken = token.accessToken;
-      (session as any).userId = token.id;
+      session.accessToken = token.accessToken;
+      session.userId = token.id;
+      session.authError = token.authError;
       return session;
     },
   },
