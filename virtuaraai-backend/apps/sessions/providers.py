@@ -191,7 +191,12 @@ def _request_json(url: str, *, api_key: str, timeout_seconds: float, payload: di
     request = Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "VirtuaraAI/1.0",
+        },
         method="POST",
     )
     try:
@@ -217,7 +222,12 @@ def _stream_request_json(url: str, *, api_key: str, timeout_seconds: float, payl
     request = Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "VirtuaraAI/1.0",
+        },
         method="POST",
     )
     try:
@@ -270,7 +280,7 @@ def get_text_provider() -> TextProvider:
         )
     defaults = {
         "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
-        "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+        "groq": ("https://api.groq.com/openai/v1", "openai/gpt-oss-20b"),
     }
     if normalized not in {*defaults, "openai-compatible"}:
         return UnconfiguredTextProvider(

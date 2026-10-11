@@ -1,3 +1,6 @@
+import os
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
@@ -127,11 +130,18 @@ class LearningLoopTests(APITestCase):
         self.assertIn("x + 4 = 11", resumed.data["response_text"])
         self.assertEqual(LearnerObjectiveState.objects.get(pk=state.pk).evidence_count, 2)
 
-        blocked = self.client.post(
-            f"/api/v1/sessions/{session_id}/enrich/",
-            {"client_turn_id": "turn-follow"},
-            format="json",
-        )
+        with patch.dict(
+            os.environ,
+            {
+                "VIRTUARA_TEXT_PROVIDER": "",
+                "VIRTUARA_TEXT_PROVIDER_API_KEY": "",
+            },
+        ):
+            blocked = self.client.post(
+                f"/api/v1/sessions/{session_id}/enrich/",
+                {"client_turn_id": "turn-follow"},
+                format="json",
+            )
         self.assertEqual(blocked.status_code, 503)
         self.assertEqual(blocked.data["error"], "ai_provider_unavailable")
         self.assertIsNone(blocked.data["model_response"])

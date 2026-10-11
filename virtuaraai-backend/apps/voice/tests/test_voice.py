@@ -1,3 +1,5 @@
+import os
+
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
@@ -26,6 +28,14 @@ BSc Computer Science
 
 
 @override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
+@patch.dict(
+    os.environ,
+    {
+        "VIRTUARA_TEXT_PROVIDER": "",
+        "VIRTUARA_TEXT_PROVIDER_API_KEY": "",
+        "VIRTUARA_TEXT_PROVIDER_MODEL": "",
+    },
+)
 class VoiceRuntimeTests(APITestCase):
     def setUp(self):
         self.learner = User.objects.create_user(email="voice@example.com", password="pass-12345", full_name="Voice Learner")

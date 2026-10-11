@@ -26,7 +26,7 @@ class ProviderAdapterTests(SimpleTestCase):
             provider = get_text_provider()
         self.assertIsInstance(provider, OpenAICompatibleTextProvider)
         self.assertEqual(provider.name, "groq")
-        self.assertEqual(provider.model, "llama-3.3-70b-versatile")
+        self.assertEqual(provider.model, "openai/gpt-oss-20b")
 
     def test_missing_or_unknown_provider_fails_closed(self):
         with patch.dict(os.environ, {}, clear=True):
