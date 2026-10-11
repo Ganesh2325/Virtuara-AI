@@ -119,6 +119,60 @@ class ProviderAdapterTests(SimpleTestCase):
             stream_request.call_args.kwargs["payload"]["stream_options"]["include_usage"]
         )
 
+    @patch("apps.sessions.providers._stream_request_json")
+    def test_structured_stream_error_event_is_not_reported_as_empty(self, stream_request):
+        stream_request.return_value = iter(
+            [
+                {
+                    "error": {
+                        "code": "json_validate_failed",
+                        "message": "provider-specific details",
+                    }
+                }
+            ]
+        )
+        provider = OpenAICompatibleTextProvider(
+            name="groq",
+            api_key="secret",
+            base_url="https://api.groq.com/openai/v1",
+            model="openai/gpt-oss-20b",
+            timeout_seconds=3,
+        )
+
+        with self.assertRaisesRegex(ProviderResponseError, "required response format"):
+            list(
+                provider.stream_chat(
+                    [{"role": "system", "content": "Return only one valid JSON object."}]
+                )
+            )
+
+    @patch("apps.sessions.providers._request_json")
+    def test_gpt_oss_reserves_reasoning_budget_and_requests_json(self, request_json):
+        request_json.return_value = {
+            "choices": [{"message": {"content": '{"answer":"ok"}'}, "finish_reason": "stop"}],
+            "usage": {},
+        }
+        provider = OpenAICompatibleTextProvider(
+            name="groq",
+            api_key="secret",
+            base_url="https://api.groq.com/openai/v1",
+            model="openai/gpt-oss-20b",
+            timeout_seconds=3,
+        )
+
+        provider.generate_chat(
+            [
+                {"role": "system", "content": "Return only one valid JSON object."},
+                {"role": "user", "content": "Question"},
+            ],
+            max_tokens=450,
+        )
+
+        payload = request_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["max_tokens"], 800)
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
     @patch("apps.sessions.providers._request_json")
     def test_timeout_and_rate_limit_are_consistent(self, request_json):
         provider = OpenAICompatibleTextProvider(

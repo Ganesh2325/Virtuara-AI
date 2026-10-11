@@ -9,7 +9,15 @@ class GeneralConversation(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="general_conversations")
+    subject_ref = models.ForeignKey(
+        "subjects.Subject",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="general_conversations",
+    )
     subject = models.CharField(max_length=120, blank=True)
+    topic = models.CharField(max_length=160, blank=True)
     status = models.CharField(max_length=20, choices=STATUSES, default="active")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -26,6 +34,7 @@ class GeneralTurn(models.Model):
     client_turn_id = models.CharField(max_length=80, unique=True)
     user_text = models.TextField()
     assistant_text = models.TextField()
+    response_payload = models.JSONField(default=dict)
     provider = models.CharField(max_length=40)
     model = models.CharField(max_length=120)
     prompt_tokens = models.PositiveIntegerField(default=0)

@@ -5,13 +5,15 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Send, Mic, MicOff, RefreshCw, Brain, MessageSquare, Briefcase } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { getSubjects, getObjectives, createSession, beginSession, submitTurn, completeSession } from "@/lib/api";
-import { useAria } from "@/components/aria/AriaProvider";
+import { getObjectives, createSession, beginSession, submitTurn, completeSession } from "@/lib/api";
+import { useAria, type AriaDisplayBlock } from "@/components/aria/AriaProvider";
 
 interface Message {
   id: number;
   role: "ai" | "user";
   content: string;
+  blocks?: AriaDisplayBlock[];
+  followUp?: string | null;
   timestamp: string;
 }
 
@@ -23,6 +25,69 @@ function nowStr() {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
+}
+
+function isDisplayBlock(value: unknown): value is AriaDisplayBlock {
+  if (!value || typeof value !== "object" || !("type" in value)) return false;
+  return ["paragraph", "emphasis", "list", "numbered_steps", "code", "math", "table"]
+    .includes(String((value as { type?: unknown }).type));
+}
+
+function cleanCompatibilityText(value: string) {
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, "")
+    .replace(/\s*\|\s*/g, " · ")
+    .replace(/\\([*_])/g, "$1")
+    .replace(/\\\(|\\\)|\\\[|\\\]|\$\$/g, "")
+    .trim();
+}
+
+function DisplayBlocks({ blocks }: { blocks: AriaDisplayBlock[] }) {
+  return (
+    <div className="space-y-3">
+      {blocks.map((block, index) => {
+        if (block.type === "paragraph") return <p key={index}>{block.text}</p>;
+        if (block.type === "emphasis") return <p key={index} className="font-bold text-text-heading">{block.text}</p>;
+        if (block.type === "list") {
+          return <ul key={index} className="list-disc pl-5 space-y-1">{block.items.map((item) => <li key={item}>{item}</li>)}</ul>;
+        }
+        if (block.type === "numbered_steps") {
+          return <ol key={index} className="list-decimal pl-5 space-y-1">{block.items.map((item) => <li key={item}>{item}</li>)}</ol>;
+        }
+        if (block.type === "code") {
+          return (
+            <div key={index} className="overflow-hidden rounded-xl border border-border-subtle bg-[#171717] text-[#f7f3e8]">
+              {block.language && <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-[#c9a84c] border-b border-white/10">{block.language}</div>}
+              <pre className="overflow-x-auto p-3 text-[12px] leading-relaxed"><code>{block.code}</code></pre>
+            </div>
+          );
+        }
+        if (block.type === "math") {
+          return (
+            <div key={index} className="rounded-xl border border-border-gold bg-gold-500/5 px-4 py-3">
+              {block.label && <p className="text-[11px] text-text-tertiary mb-1">{block.label}</p>}
+              <p className="font-mono text-[14px] text-text-heading">{block.expression}</p>
+            </div>
+          );
+        }
+        if (block.type === "table") {
+          return (
+            <div key={index} className="overflow-x-auto rounded-xl border border-border-subtle">
+              <table className="min-w-full text-left text-[12px]">
+                <thead className="bg-bg-overlay"><tr>{block.columns.map((column) => <th key={column} className="px-3 py-2 font-bold">{column}</th>)}</tr></thead>
+                <tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex} className="border-t border-border-subtle">{row.map((cell, cellIndex) => <td key={cellIndex} className="px-3 py-2 align-top">{cell}</td>)}</tr>)}</tbody>
+              </table>
+            </div>
+          );
+        }
+        return null;
+      })}
+    </div>
+  );
 }
 
 function MessageBubble({ msg }: { msg: Message }) {
@@ -48,7 +113,8 @@ function MessageBubble({ msg }: { msg: Message }) {
               : { background: "var(--text-gold-deep)", border: "none", color: "white", borderRadius: "16px 4px 16px 16px" }
           }
         >
-          {msg.content}
+          {msg.blocks?.length ? <DisplayBlocks blocks={msg.blocks} /> : cleanCompatibilityText(msg.content)}
+          {msg.followUp && <p className="mt-3 pt-3 border-t border-border-subtle font-semibold text-text-secondary">{msg.followUp}</p>}
         </div>
         <p className="text-[10px] mt-2 px-1 font-mono text-text-tertiary uppercase tracking-wider font-bold">
           {msg.timestamp}
@@ -80,9 +146,10 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   const { data: session } = useSession();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const subject = searchParams?.get("subject") ?? "General Learning";
-  const accessToken = (session as { accessToken?: string } | null)?.accessToken;
   const aria = useAria();
+  const selectedSubject = aria.activeSubject;
+  const subject = selectedSubject?.name ?? "Selecting subject…";
+  const accessToken = session?.accessToken;
   const { setTask, clearTask, registerHandler } = aria;
   const listening = aria.avatarState === "listening";
 
@@ -93,7 +160,6 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   const [error, setError] = useState("");
 
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [subjectId, setSubjectId] = useState<string | null>(null);
   const [teachingActive, setTeachingActive] = useState(false);
   const [objectiveTitle, setObjectiveTitle] = useState("");
   const [bootKey, setBootKey] = useState(0);
@@ -102,25 +168,19 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!subject || subject === "General Learning") return;
-    getSubjects(accessToken).then((list) => {
-      const match = list.find((s) => s.name === subject || s.slug === subject.toLowerCase().replace(/\s+/g, "-"));
-      if (match) setSubjectId(match.id);
-    }).catch(() => {});
-  }, [subject, accessToken]);
-
   const makeWelcome = useCallback((m: Mode): Message => ({
     id: Date.now(),
     role: "ai",
     content: m === "quiz"
-      ? `Quiz mode activated for **${subject}**! I'll ask you 5 questions and grade your answers. Ready? Here comes question 1:`
-      : `Hello! I'm Aria, your AI mentor. Today we're exploring **${subject}**. What would you like to learn?`,
+      ? `Quiz mode is ready for ${subject}. I’ll use the available curriculum objective and score each answer.`
+      : `We’re exploring ${subject}. What would you like to understand?`,
     timestamp: nowStr(),
   }), [subject]);
 
   useEffect(() => {
     let cancelled = false;
+    let createdSessionId: string | null = null;
+    let closedDuringCleanup = false;
     setTeachingActive(false);
     setObjectiveTitle("");
     setSessionId(null);
@@ -129,26 +189,27 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     setError("");
     setMessages([makeWelcome(mode)]);
 
-    if (!accessToken || !subject || subject === "General Learning") {
+    if (!accessToken || !selectedSubject) {
       return;
     }
 
     (async () => {
       try {
-        const list = await getSubjects(accessToken);
-        const match = list.find((s) => s.name === subject || s.slug === subject.toLowerCase().replace(/\s+/g, "-"));
-        if (!match || cancelled) return;
-        setSubjectId(match.id);
         const requested = searchParams?.get("objective");
-        const objectives = await getObjectives(match.slug, accessToken);
+        if (mode === "chat" && !requested) return;
+        const objectives = await getObjectives(selectedSubject.slug, accessToken);
         const objective = objectives.find((item) => item.slug === requested) ?? objectives[0];
         if (!objective || cancelled) return;
         const sess = await createSession(
-          { subject: match.id, objective: objective.id, session_type: mode === "quiz" ? "quiz" : "tutor" },
+          { subject: selectedSubject.id, objective: objective.id, session_type: mode === "quiz" ? "quiz" : "tutor" },
           accessToken
         );
+        createdSessionId = sess.id;
         const started = await beginSession(sess.id, accessToken);
-        if (cancelled) return;
+        if (cancelled) {
+          if (!closedDuringCleanup) completeSession(sess.id, {}, accessToken).catch(() => {});
+          return;
+        }
         setSessionId(sess.id);
         setTeachingActive(true);
         setObjectiveTitle(objective.title);
@@ -163,8 +224,14 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
       }
     })();
 
-    return () => { cancelled = true; };
-  }, [subject, mode, accessToken, makeWelcome, searchParams, bootKey]);
+    return () => {
+      cancelled = true;
+      if (createdSessionId) {
+        closedDuringCleanup = true;
+        completeSession(createdSessionId, {}, accessToken).catch(() => {});
+      }
+    };
+  }, [subject, selectedSubject, mode, accessToken, makeWelcome, searchParams, bootKey]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -177,17 +244,22 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   useEffect(() => {
     setTask({
       kind: mode === "quiz" ? "quiz" : teachingActive ? "learning" : "general",
-      subject,
+      subject: selectedSubject,
       learningSessionId: teachingActive ? sessionId : null,
     });
     return () => clearTask(mode === "quiz" ? "quiz" : teachingActive ? "learning" : "general");
-  }, [setTask, clearTask, mode, subject, sessionId, teachingActive]);
+  }, [setTask, clearTask, mode, selectedSubject, sessionId, teachingActive]);
 
   useEffect(() => {
     return registerHandler((turn) => {
       if (!["general", "learning", "quiz"].includes(turn.context)) return;
       const replyText = turn.spokenText ?? (typeof turn.body.message === "string" ? turn.body.message : "Aria did not produce a reply.");
-      const reply: Message = { id: Date.now() + 1, role: "ai", content: replyText, timestamp: nowStr() };
+      const displayText = typeof turn.body.response_text === "string" ? turn.body.response_text : replyText;
+      const blocks = Array.isArray(turn.body.display_blocks)
+        ? turn.body.display_blocks.filter(isDisplayBlock)
+        : undefined;
+      const followUp = typeof turn.body.follow_up === "string" ? turn.body.follow_up : null;
+      const reply: Message = { id: Date.now() + 1, role: "ai", content: displayText, blocks, followUp, timestamp: nowStr() };
       setMessages((prev) => {
         if (turn.inputModality === "text") return [...prev, reply];
         const heard: Message = { id: Date.now(), role: "user", content: turn.heard, timestamp: nowStr() };
@@ -211,7 +283,7 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     if (sessionId || !accessToken) return sessionId;
     try {
       const data = await createSession(
-        { subject: subjectId ?? undefined, session_type: mode === "quiz" ? "quiz" : "tutor" },
+        { subject: selectedSubject?.id, session_type: mode === "quiz" ? "quiz" : "tutor" },
         accessToken
       );
       setSessionId(data.id);

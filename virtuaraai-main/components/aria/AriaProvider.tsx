@@ -8,9 +8,24 @@ const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export type AriaKind = "general" | "learning" | "quiz" | "interview";
 export type AriaAvatarState = "idle" | "ready" | "listening" | "processing" | "speaking" | "error";
 
+export type AriaSubject = {
+  id: string;
+  slug: string;
+  name: string;
+};
+
+export type AriaDisplayBlock =
+  | { type: "paragraph" | "emphasis"; text: string }
+  | { type: "list" | "numbered_steps"; items: string[] }
+  | { type: "code"; language?: string; code: string }
+  | { type: "math"; expression: string; label?: string }
+  | { type: "table"; columns: string[]; rows: string[][] };
+
 export type AriaTask = {
   kind: AriaKind;
-  subject?: string;
+  subject?: AriaSubject | null;
+  topic?: string;
+  responseMode?: "concise" | "simple" | "detailed" | "steps" | "code" | "yes_no";
   learningSessionId?: string | null;
   interviewSessionId?: string | null;
 };
@@ -35,7 +50,9 @@ type AriaValue = {
   realtimeWebrtc: boolean;
   liveAvatarStream: false;
   transport: "browser_speech_api";
+  activeSubject: AriaSubject | null;
   task: AriaTask;
+  setActiveSubject: (subject: AriaSubject) => void;
   setTask: (task: AriaTask) => void;
   clearTask: (kind: AriaKind) => void;
   start: () => void;
@@ -78,6 +95,22 @@ function speechRecognition(): BrowserSpeechConstructor | null {
   return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
 }
 
+export function speechSafeText(value: string) {
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/```[\s\S]*?```/g, "I included the complete code in the chat.")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, "")
+    .replace(/\s*\|\s*/g, ", ")
+    .replace(/\\\(|\\\)|\\\[|\\\]|\$\$/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function AriaProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = useSession();
   const token = (session as { accessToken?: string } | null)?.accessToken;
@@ -86,6 +119,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState("");
   const [active, setActive] = useState(false);
   const [providerConfigured, setProviderConfigured] = useState(false);
+  const [activeSubject, setActiveSubjectState] = useState<AriaSubject | null>(null);
   const [task, setTaskState] = useState<AriaTask>({ kind: "general" });
   const taskRef = useRef(task);
   const activeRef = useRef(false);
@@ -94,6 +128,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
   const tokenRef = useRef(token);
   const listenRef = useRef<() => void>(() => {});
   const conversationRef = useRef<string | null>(null);
+  const activeSubjectRef = useRef<AriaSubject | null>(null);
   const generalSubjectRef = useRef("");
   const requestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
@@ -115,16 +150,31 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
     setAvatarState(activeRef.current ? "ready" : "idle");
   }, []);
 
+  const setActiveSubject = useCallback((next: AriaSubject) => {
+    if (activeSubjectRef.current?.id === next.id) return;
+    cancelRuntime();
+    conversationRef.current = null;
+    generalSubjectRef.current = next.slug;
+    activeSubjectRef.current = next;
+    setActiveSubjectState(next);
+    const generalTask: AriaTask = { kind: "general", subject: next };
+    taskRef.current = generalTask;
+    setTaskState(generalTask);
+    setCaption(`Active subject changed to ${next.name}.`);
+    setError("");
+  }, [cancelRuntime]);
+
   const setTask = useCallback((next: AriaTask) => {
     const current = taskRef.current;
     const changed =
       current.kind !== next.kind ||
-      current.subject !== next.subject ||
+      current.subject?.id !== next.subject?.id ||
+      current.topic !== next.topic ||
       current.learningSessionId !== next.learningSessionId ||
       current.interviewSessionId !== next.interviewSessionId;
     if (changed) cancelRuntime();
     if (next.kind === "general") {
-      const subject = next.subject ?? "";
+      const subject = next.subject?.slug ?? "";
       if (generalSubjectRef.current && generalSubjectRef.current !== subject) {
         conversationRef.current = null;
       }
@@ -144,7 +194,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
     cancelRuntime();
     const next: AriaTask = {
       kind: "general",
-      subject: generalSubjectRef.current || undefined,
+      subject: activeSubjectRef.current,
     };
     taskRef.current = next;
     setTaskState(next);
@@ -161,9 +211,10 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
   }, [cancelRuntime]);
 
   const speak = useCallback((text: string) => {
-    if (typeof window === "undefined" || !text.trim()) return;
+    const safeText = speechSafeText(text);
+    if (typeof window === "undefined" || !safeText) return;
     if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
-      setCaption(text);
+      setCaption(safeText);
       setAvatarState(activeRef.current ? "ready" : "idle");
       setError("Speech playback is unavailable in this browser. The response is shown as text.");
       return;
@@ -171,7 +222,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
     const speechSequence = ++speechSequenceRef.current;
     recognitionRef.current?.stop();
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
+    const utter = new SpeechSynthesisUtterance(safeText);
     utter.lang = "en-US";
     utter.rate = 0.95;
     utter.onstart = () => {
@@ -187,7 +238,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
       setAvatarState(activeRef.current ? "ready" : "idle");
       setError("Speech playback stopped. The response remains available as text.");
     };
-    setCaption(text);
+    setCaption(safeText);
     window.speechSynthesis.speak(utter);
   }, []);
 
@@ -227,9 +278,15 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
       client_turn_id: crypto.randomUUID(),
       input_modality: inputModality,
     };
+    const subject = current.subject ?? activeSubjectRef.current;
     if (current.learningSessionId) body.learning_session_id = current.learningSessionId;
     if (current.interviewSessionId) body.interview_session_id = current.interviewSessionId;
-    if (current.subject) body.subject = current.subject;
+    if (subject) {
+      body.subject_id = subject.id;
+      body.subject_slug = subject.slug;
+    }
+    if (current.topic) body.topic = current.topic;
+    if (current.responseMode) body.response_mode = current.responseMode;
     if (current.kind === "general" && conversationRef.current) {
       body.conversation_id = conversationRef.current;
     }
@@ -285,6 +342,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
                 body: payload,
               }));
               setError("");
+              if (spoken) setCaption(spoken);
               if (activeRef.current && spoken) speak(spoken);
               else setAvatarState("idle");
             }
@@ -452,14 +510,15 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo<AriaValue>(() => ({
-    avatarState, caption, error, active, providerConfigured, task,
+    avatarState, caption, error, active, providerConfigured, activeSubject, task,
     realtimeWebrtc: false,
     liveAvatarStream: false,
     transport: "browser_speech_api",
-    setTask, clearTask, start, end, listen, stopListening, interrupt, speak,
+    setActiveSubject, setTask, clearTask, start, end, listen, stopListening, interrupt, speak,
     sendText, resetConversation, registerHandler,
   }), [
-    avatarState, caption, error, active, providerConfigured, task, setTask, clearTask,
+    avatarState, caption, error, active, providerConfigured, activeSubject, task,
+    setActiveSubject, setTask, clearTask,
     start, end, listen, stopListening, interrupt, speak, sendText, resetConversation, registerHandler,
   ]);
 

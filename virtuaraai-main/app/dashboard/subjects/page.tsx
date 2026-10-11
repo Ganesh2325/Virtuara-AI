@@ -21,6 +21,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { getSubjects, type DjangoSubject } from "@/lib/api";
+import { useAria } from "@/components/aria/AriaProvider";
 
 // Map Django category slugs → display labels
 const CATEGORY_LABELS: Record<string, string> = {
@@ -53,6 +54,7 @@ const CATEGORIES: Category[] = ["All", "Exact Sciences", "Humanities", "Computer
 export default function SubjectsPage() {
   const router = useRouter();
   const { data: session } = useSession();
+  const { setActiveSubject } = useAria();
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<Category>("All");
   const [subjects, setSubjects] = useState<DjangoSubject[]>([]);
@@ -60,7 +62,7 @@ export default function SubjectsPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const token = (session as any)?.accessToken as string | undefined;
+    const token = session?.accessToken;
     getSubjects(token)
       .then(setSubjects)
       .catch(() => setError("Could not load subjects. Is the backend running?"))
@@ -74,8 +76,10 @@ export default function SubjectsPage() {
     return matchesSearch && matchesCategory;
   });
 
-  const handleSelect = (_slug: string, name: string) => {
-    router.push(`/dashboard?subject=${encodeURIComponent(name)}`);
+  const handleSelect = (selected: DjangoSubject) => {
+    setActiveSubject({ id: selected.id, slug: selected.slug, name: selected.name });
+    localStorage.setItem("virtuara_active_subject", selected.slug);
+    router.push(`/dashboard?subject=${encodeURIComponent(selected.slug)}`);
   };
 
   if (loading) {
@@ -91,7 +95,7 @@ export default function SubjectsPage() {
       <div className="min-h-full bg-bg-page flex flex-col items-center justify-center gap-4">
         <p className="text-semantic-error-text font-bold">{error}</p>
         <button
-          onClick={() => { const token = (session as any)?.accessToken as string | undefined; setError(""); setLoading(true); getSubjects(token).then(setSubjects).catch(() => setError("Still unreachable.")).finally(() => setLoading(false)); }}
+          onClick={() => { const token = session?.accessToken; setError(""); setLoading(true); getSubjects(token).then(setSubjects).catch(() => setError("Still unreachable.")).finally(() => setLoading(false)); }}
           className="px-6 py-2 rounded-xl bg-bg-surface border border-border-subtle text-text-gold-deep font-bold text-sm hover:border-gold-500/30 transition-all"
         >
           Retry
@@ -152,7 +156,7 @@ export default function SubjectsPage() {
                   animate={{ opacity: 1, scale: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.95, y: 15 }}
                   transition={{ duration: 0.4, delay: index * 0.05 }}
-                  onClick={() => handleSelect(s.slug, s.name)}
+                  onClick={() => handleSelect(s)}
                   className="group bg-bg-surface border border-border-subtle rounded-[32px] p-8 cursor-pointer hover:border-border-gold hover:-translate-y-2 hover:shadow-md transition-all duration-500 relative flex flex-col"
                 >
                   {/* Top Row */}

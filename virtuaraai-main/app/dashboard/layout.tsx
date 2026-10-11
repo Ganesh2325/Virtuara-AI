@@ -7,25 +7,48 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Bell, ChevronDown, LogOut, Settings, User as UserIcon, LayoutDashboard, History, BookOpen, Trophy, ChevronRight, Briefcase } from "lucide-react";
 import Link from "next/link";
 import NotificationDropdown from "@/components/dashboard/NotificationDropdown";
-import { getSessionStats } from "@/lib/api";
-import { AriaProvider } from "@/components/aria/AriaProvider";
+import { getSessionStats, getSubjects } from "@/lib/api";
+import { AriaProvider, useAria } from "@/components/aria/AriaProvider";
 
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  return (
+    <AriaProvider>
+      <DashboardShell>{children}</DashboardShell>
+    </AriaProvider>
+  );
+}
+
+function DashboardShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [currentSubject, setCurrentSubject] = useState("Mathematics");
   const { data: session, status } = useSession();
+  const { activeSubject, setActiveSubject } = useAria();
   const [dropOpen, setDropOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
 
   useEffect(() => {
-    const selected = new URLSearchParams(window.location.search).get("subject");
-    setCurrentSubject(selected || "Mathematics");
-  }, [pathname]);
+    const token = session?.accessToken;
+    if (!token) return;
+    let cancelled = false;
+    getSubjects(token).then((subjects) => {
+      if (cancelled || subjects.length === 0) return;
+      const requested = new URLSearchParams(window.location.search).get("subject");
+      const stored = localStorage.getItem("virtuara_active_subject");
+      const selected =
+        subjects.find((item) => item.slug === requested || item.id === requested) ??
+        subjects.find((item) => item.id === activeSubject?.id) ??
+        subjects.find((item) => item.slug === stored) ??
+        subjects.find((item) => item.slug === "mathematics") ??
+        subjects[0];
+      setActiveSubject({ id: selected.id, slug: selected.slug, name: selected.name });
+      localStorage.setItem("virtuara_active_subject", selected.slug);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [pathname, session?.accessToken, activeSubject?.id, setActiveSubject]);
 
   useEffect(() => {
     // ── AUTH CHECK ────────────────────────────────
@@ -104,7 +127,9 @@ export default function DashboardLayout({
             <div className="hidden lg:flex items-center h-10 px-4 rounded-xl border border-border-subtle bg-bg-surface/50 gap-4 backdrop-blur-sm group hover:border-gold-500/30 transition-all cursor-default shadow-sm">
               <div className="flex items-center gap-3">
                 <BookOpen className="w-4 h-4 text-text-gold-deep group-hover:scale-110 transition-transform" />
-                <span className="text-[13px] font-bold text-text-primary tracking-tight antialiased">{currentSubject}</span>
+                <span className="text-[13px] font-bold text-text-primary tracking-tight antialiased">
+                  {activeSubject?.name ?? "Selecting subject…"}
+                </span>
               </div>
               <div className="w-[1px] h-4 bg-border-subtle" />
               <Link 
@@ -209,7 +234,7 @@ export default function DashboardLayout({
 
       {/* PAGE CONTENT */}
       <main className="flex-1 overflow-hidden relative">
-        <AriaProvider>{children}</AriaProvider>
+        {children}
       </main>
 
     </div>

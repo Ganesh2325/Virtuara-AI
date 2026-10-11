@@ -10,7 +10,7 @@ const STATE_CONFIG: Record<AriaAvatarState, { label: string }> = {
   ready: { label: "Voice ready" },
   speaking: { label: "Aria is speaking" },
   listening: { label: "Listening" },
-  processing: { label: "Checking your answer" },
+  processing: { label: "Aria is thinking" },
   error: { label: "Voice needs attention" },
 };
 
@@ -55,7 +55,7 @@ export default function AvatarStream({ onEndSession }: { speaking?: boolean; onE
         <div className="px-5 py-2 rounded-full text-[12px] font-semibold bg-bg-overlay border border-border-subtle text-text-secondary">
           {STATE_CONFIG[aria.avatarState].label}
           {aria.task.kind !== "general" ? ` · ${aria.task.kind}` : ""}
-          {aria.task.subject ? ` · ${aria.task.subject}` : ""}
+          {aria.task.subject ? ` · ${aria.task.subject.name}` : ""}
         </div>
         <p className="text-[14px] text-center max-w-sm leading-relaxed text-text-secondary font-medium min-h-[42px] whitespace-pre-wrap">
           {aria.caption}

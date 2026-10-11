@@ -19,8 +19,9 @@ from apps.interviews.models import InterviewSession
 from apps.sessions.models import LearningSession
 from apps.sessions.providers import get_text_provider
 from apps.sessions.teaching import answer_turn
-from apps.voice.general import general_stream, general_turn
+from apps.voice.general import general_stream, general_turn, resolve_subject
 from apps.voice.models import GeneralConversation
+from apps.voice.responses import clean_plain_text
 from apps.voice.throttles import VoiceTurnThrottle
 
 CONTEXTS = {"general", "learning", "quiz", "interview"}
@@ -86,12 +87,28 @@ class VoiceTurnView(APIView):
     def _learning(self, request, context, content, client_turn_id):
         session = LearningSession.objects.filter(
             user=request.user, pk=request.data.get("learning_session_id")
-        ).first()
+        ).select_related("subject").first()
         if session is None:
             return Response(
                 {
                     "error": "learning_context_required",
                     "message": "Start a lesson before sending a spoken answer. This transcript was not scored.",
+                    **speech_meta(),
+                },
+                status=409,
+            )
+        requested_subject, subject_error = resolve_subject(
+            subject_id=request.data.get("subject_id"),
+            subject_slug=(request.data.get("subject_slug") or ""),
+            legacy_subject=(request.data.get("subject") or ""),
+        )
+        if subject_error:
+            return Response(subject_error, status=400)
+        if requested_subject and session.subject_id != requested_subject.id:
+            return Response(
+                {
+                    "error": "stale_learning_context",
+                    "message": "The selected subject changed. This answer was not scored against the previous lesson.",
                     **speech_meta(),
                 },
                 status=409,
@@ -110,7 +127,7 @@ class VoiceTurnView(APIView):
         payload = dict(payload)
         payload.update(speech_meta())
         payload["context"] = context
-        payload["spoken_text"] = payload.get("response_text")
+        payload["spoken_text"] = clean_plain_text(payload.get("response_text"))
         payload["input_modality"] = "speech"
         return Response(payload, status=code)
 
@@ -131,7 +148,7 @@ class VoiceTurnView(APIView):
         payload = dict(payload)
         payload.update(speech_meta())
         payload["context"] = "interview"
-        payload["spoken_text"] = payload.get("response_text")
+        payload["spoken_text"] = clean_plain_text(payload.get("response_text"))
         payload["input_modality"] = "speech"
         return Response(payload, status=code)
 
@@ -141,7 +158,11 @@ class VoiceTurnView(APIView):
             content=content,
             client_turn_id=client_turn_id,
             conversation_id=request.data.get("conversation_id"),
+            subject_id=request.data.get("subject_id"),
+            subject_slug=(request.data.get("subject_slug") or ""),
             subject=(request.data.get("subject") or ""),
+            topic=(request.data.get("topic") or ""),
+            requested_mode=(request.data.get("response_mode") or request.data.get("intent") or ""),
         )
         payload.update(speech_meta())
         payload["input_modality"] = (
@@ -167,7 +188,11 @@ class GeneralStreamView(APIView):
             content=content,
             client_turn_id=client_turn_id,
             conversation_id=request.data.get("conversation_id"),
+            subject_id=request.data.get("subject_id"),
+            subject_slug=(request.data.get("subject_slug") or ""),
             subject=(request.data.get("subject") or ""),
+            topic=(request.data.get("topic") or ""),
+            requested_mode=(request.data.get("response_mode") or request.data.get("intent") or ""),
         )
         if code != 200 or isinstance(result, dict):
             return Response(result, status=code)
@@ -186,12 +211,17 @@ class ConversationCollectionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        conversations = GeneralConversation.objects.filter(user=request.user).order_by("-updated_at")[:30]
+        conversations = GeneralConversation.objects.filter(user=request.user).select_related("subject_ref").order_by("-updated_at")[:30]
         return Response(
             [
                 {
                     "id": str(item.id),
-                    "subject": item.subject,
+                    "subject": {
+                        "id": str(item.subject_ref_id),
+                        "slug": item.subject_ref.slug,
+                        "name": item.subject_ref.name,
+                    } if item.subject_ref else None,
+                    "topic": item.topic or None,
                     "status": item.status,
                     "turn_count": item.turns.count(),
                     "updated_at": item.updated_at.isoformat(),
@@ -205,14 +235,19 @@ class ConversationDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, conversation_id):
-        conversation = GeneralConversation.objects.filter(user=request.user, pk=conversation_id).first()
+        conversation = GeneralConversation.objects.filter(user=request.user, pk=conversation_id).select_related("subject_ref").first()
         if conversation is None:
             return Response({"error": "not_found"}, status=404)
         turns = conversation.turns.order_by("created_at")[:100]
         return Response(
             {
                 "id": str(conversation.id),
-                "subject": conversation.subject,
+                "subject": {
+                    "id": str(conversation.subject_ref_id),
+                    "slug": conversation.subject_ref.slug,
+                    "name": conversation.subject_ref.name,
+                } if conversation.subject_ref else None,
+                "topic": conversation.topic or None,
                 "status": conversation.status,
                 "turns": [
                     {

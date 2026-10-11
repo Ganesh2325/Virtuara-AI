@@ -96,16 +96,18 @@ class OpenAICompatibleTextProvider(TextProvider):
     def generate_chat(self, messages: list[dict], *, max_tokens: int = 500) -> ProviderResult:
         safe_messages = self._safe_messages(messages)
         started = time.monotonic()
+        request_payload = {
+            "model": self.model,
+            "messages": safe_messages,
+            "max_tokens": self._completion_budget(max_tokens),
+            "temperature": 0.6,
+        }
+        self._apply_model_options(request_payload, safe_messages)
         payload = _request_json(
             f"{self.base_url}/chat/completions",
             api_key=self.api_key,
             timeout_seconds=self.timeout_seconds,
-            payload={
-                "model": self.model,
-                "messages": safe_messages,
-                "max_tokens": max(1, min(int(max_tokens), 1000)),
-                "temperature": 0.6,
-            },
+            payload=request_payload,
             provider=self.name,
         )
         try:
@@ -138,27 +140,53 @@ class OpenAICompatibleTextProvider(TextProvider):
             raise ProviderResponseError(self.name, "At least one provider message is required.")
         return safe_messages
 
+    def _apply_model_options(self, payload: dict, messages: list[dict]) -> None:
+        if self.model.startswith("openai/gpt-oss"):
+            payload["reasoning_effort"] = "low"
+        if any("Return only one valid JSON object" in item["content"] for item in messages):
+            payload["response_format"] = {"type": "json_object"}
+
+    def _completion_budget(self, requested_tokens: int) -> int:
+        requested = max(1, min(int(requested_tokens), 1000))
+        # GPT-OSS reports hidden reasoning tokens against max_tokens. Reserve a
+        # small bounded allowance so reasoning cannot consume the visible
+        # response budget and leave an otherwise successful response empty.
+        if self.model.startswith("openai/gpt-oss"):
+            return min(requested + 350, 1350)
+        return requested
+
     def stream_chat(self, messages: list[dict], *, max_tokens: int = 500):
         safe_messages = self._safe_messages(messages)
         started = time.monotonic()
+        request_payload = {
+            "model": self.model,
+            "messages": safe_messages,
+            "max_tokens": self._completion_budget(max_tokens),
+            "temperature": 0.6,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        self._apply_model_options(request_payload, safe_messages)
         chunks = _stream_request_json(
             f"{self.base_url}/chat/completions",
             api_key=self.api_key,
             timeout_seconds=self.timeout_seconds,
-            payload={
-                "model": self.model,
-                "messages": safe_messages,
-                "max_tokens": max(1, min(int(max_tokens), 1000)),
-                "temperature": 0.6,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            },
+            payload=request_payload,
             provider=self.name,
         )
         text_parts = []
         finish_reason = ""
         usage = {}
         for payload in chunks:
+            if payload.get("error"):
+                error = payload.get("error") or {}
+                code = error.get("code") if isinstance(error, dict) else ""
+                message = (
+                    "The AI provider could not produce the required response format."
+                    if code == "json_validate_failed"
+                    else "The AI provider ended the response stream with an error."
+                )
+                raise ProviderResponseError(self.name, message)
             usage = payload.get("usage") or (payload.get("x_groq") or {}).get("usage") or usage
             choices = payload.get("choices") or []
             if not choices:
@@ -205,6 +233,16 @@ def _request_json(url: str, *, api_key: str, timeout_seconds: float, payload: di
     except HTTPError as exc:
         if exc.code == 429:
             raise ProviderRateLimited(provider, "The AI provider rate limit was reached. Try again shortly.") from exc
+        if exc.code == 400:
+            try:
+                error = json.loads(exc.read(200_000)).get("error") or {}
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                error = {}
+            if isinstance(error, dict) and error.get("code") == "json_validate_failed":
+                raise ProviderResponseError(
+                    provider,
+                    "The AI provider could not produce the required response format.",
+                ) from exc
         raise ProviderUnavailable(provider, f"The AI provider returned HTTP {exc.code}.") from exc
     except (TimeoutError, socket.timeout) as exc:
         raise ProviderTimeout(provider, "The AI provider timed out.") from exc
@@ -235,6 +273,16 @@ def _stream_request_json(url: str, *, api_key: str, timeout_seconds: float, payl
     except HTTPError as exc:
         if exc.code == 429:
             raise ProviderRateLimited(provider, "The AI provider rate limit was reached. Try again shortly.") from exc
+        if exc.code == 400:
+            try:
+                error = json.loads(exc.read(200_000)).get("error") or {}
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                error = {}
+            if isinstance(error, dict) and error.get("code") == "json_validate_failed":
+                raise ProviderResponseError(
+                    provider,
+                    "The AI provider could not produce the required response format.",
+                ) from exc
         raise ProviderUnavailable(provider, f"The AI provider returned HTTP {exc.code}.") from exc
     except (TimeoutError, socket.timeout) as exc:
         raise ProviderTimeout(provider, "The AI provider timed out.") from exc
