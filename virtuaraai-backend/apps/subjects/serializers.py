@@ -9,11 +9,22 @@ class ModuleSerializer(serializers.ModelSerializer):
 
 
 class SubjectSerializer(serializers.ModelSerializer):
-    module_count = serializers.IntegerField(read_only=True)
+    module_count = serializers.SerializerMethodField()
+    is_custom = serializers.SerializerMethodField()
 
     class Meta:
         model = Subject
-        fields = ("id", "name", "slug", "description", "icon", "category", "order", "module_count")
+        fields = (
+            "id", "name", "slug", "description", "icon", "category", "order",
+            "module_count", "is_custom", "experience_level", "learning_goal", "status",
+        )
+
+    def get_module_count(self, subject):
+        annotated = getattr(subject, "module_count", None)
+        return annotated if annotated is not None else subject.modules.count()
+
+    def get_is_custom(self, subject):
+        return subject.owner_id is not None
 
 
 class LearningResourceSerializer(serializers.ModelSerializer):

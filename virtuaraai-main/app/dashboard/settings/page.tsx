@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSession, signOut } from "next-auth/react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -17,6 +17,7 @@ import {
   Camera,
 } from "lucide-react";
 import GlowButton from "@/components/shared/GlowButton";
+import { archiveCustomSubject, createCustomSubject, getProfile, getSubjects, type DjangoSubject } from "@/lib/api";
 
 // -- TABS --
 type SettingsTab = "profile" | "notifications" | "learning" | "account";
@@ -108,9 +109,22 @@ export default function SettingsPage() {
 // -- TAB COMPONENTS --
 
 function ProfileTab({ session }: { session: any }) {
-  const name = session?.user?.name || "Explorer";
+  const [profileName, setProfileName] = useState(session?.user?.name || "");
+  const [ageGroup, setAgeGroup] = useState("");
+  const [about, setAbout] = useState("");
+  const [level, setLevel] = useState("");
+  const name = profileName || session?.user?.name || "Explorer";
   const initials = name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
   const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (!session?.accessToken) return;
+    getProfile(session.accessToken).then((profile) => {
+      setProfileName(profile.full_name || "");
+      setAgeGroup(profile.age_group || "");
+      setAbout(profile.learning_goal || "");
+      setLevel(profile.level || "");
+    }).catch(() => {});
+  }, [session?.accessToken]);
 
   const handleSave = () => {
     setSaved(true);
@@ -142,7 +156,7 @@ function ProfileTab({ session }: { session: any }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
-        <Input label="Full Name" defaultValue={name} />
+        <Input label="Full Name" value={profileName} readOnly />
         <div className="relative">
           <Input label="Secure Email" defaultValue={session?.user?.email} readOnly />
           <div className="absolute top-[38px] right-3 flex items-center gap-1.5 px-3 py-1 rounded-full bg-semantic-success/10 border border-semantic-success/20 text-[10px] text-semantic-success font-bold tracking-wider">
@@ -166,11 +180,17 @@ function ProfileTab({ session }: { session: any }) {
         </div>
         <div className="md:col-span-2">
           <div className="flex flex-col gap-2.5">
-            <label className="text-[11px] font-bold text-text-tertiary uppercase tracking-[0.2em] ml-1.5">Personal Dossier</label>
-            <textarea 
-              placeholder="Tell Aria about your cognitive landscape..."
-              className="w-full h-[120px] p-5 bg-bg-surface border border-border-subtle rounded-xl focus:border-gold-500/50 outline-none transition-all resize-none text-[15px] text-text-primary font-bold shadow-sm placeholder:text-text-tertiary"
-            ></textarea>
+            <label className="text-[11px] font-bold text-text-tertiary uppercase tracking-[0.2em] ml-1.5">Age group</label>
+            <input value={ageGroup} readOnly className="w-full h-[52px] px-5 bg-bg-surface border border-border-subtle rounded-xl text-[15px] font-bold" />
+            <label className="text-[11px] font-bold text-text-tertiary uppercase tracking-[0.2em] ml-1.5 mt-4">Study level</label>
+            <input value={level} readOnly className="w-full h-[52px] px-5 bg-bg-surface border border-border-subtle rounded-xl text-[15px] font-bold capitalize" />
+            <label className="text-[11px] font-bold text-text-tertiary uppercase tracking-[0.2em] ml-1.5 mt-4">About you</label>
+            <textarea
+              value={about}
+              readOnly
+              placeholder="Your onboarding description appears here."
+              className="w-full h-[120px] p-5 bg-bg-surface border border-border-subtle rounded-xl outline-none resize-none text-[15px] text-text-primary font-bold shadow-sm placeholder:text-text-tertiary"
+            />
           </div>
         </div>
       </div>
@@ -237,11 +257,25 @@ function NotificationsTab() {
 }
 
 function LearningTab({ onReset }: { onReset: () => void }) {
+  const { data: session } = useSession();
   const [pace, setPace] = useState(50);
-  const subjects = [
-    "Mathematics", "Physics", "Chemistry", "Biology",
-    "History", "Literature", "Computer Science", "Economics"
-  ];
+  const [subjects, setSubjects] = useState<DjangoSubject[]>([]);
+  const [customName, setCustomName] = useState("");
+  const [subjectError, setSubjectError] = useState("");
+  useEffect(() => {
+    getSubjects(session?.accessToken).then(setSubjects).catch(() => setSubjectError("Subjects could not be loaded."));
+  }, [session?.accessToken]);
+  const addSubject = async () => {
+    if (customName.trim().length < 2 || !session?.accessToken) return;
+    try {
+      const created = await createCustomSubject({ name: customName.trim() }, session.accessToken);
+      setSubjects((current) => [...current, created]);
+      setCustomName("");
+      setSubjectError("");
+    } catch {
+      setSubjectError("The custom subject could not be created.");
+    }
+  };
   const durations = ["15 min", "30 min", "45 min", "60 min"];
 
   return (
@@ -258,17 +292,29 @@ function LearningTab({ onReset }: { onReset: () => void }) {
           <label className="text-[11px] font-bold text-text-tertiary uppercase tracking-[0.2em] mb-6 block ml-1.5">Assigned Disciplines</label>
           <div className="flex flex-wrap gap-3">
             {subjects.map(s => (
-              <button key={s} className={`px-5 py-3 rounded-xl border text-[14px] font-bold transition-all duration-500 antialiased ${
-                ["Mathematics", "Physics", "Computer Science"].includes(s) 
-                  ? "border-border-gold bg-gold-500/10 text-text-gold-deep shadow-sm" 
-                  : "border-border-subtle bg-bg-surface text-text-tertiary hover:text-text-heading hover:border-gold-500/30"
-              }`}>
-                {s}
-                {["Mathematics", "Physics", "Computer Science"].includes(s) && <CheckCircle2 className="w-4 h-4 ml-2.5 inline-block text-text-gold-deep" />}
-              </button>
+              <div key={s.id} className="px-5 py-3 rounded-xl border border-border-subtle bg-bg-surface text-[14px] font-bold text-text-heading">
+                {s.icon} {s.name}
+                {s.is_custom && (
+                  <span
+                    className="ml-2 text-semantic-error"
+                    onClick={async (event) => {
+                      event.stopPropagation();
+                      if (!session?.accessToken) return;
+                      await archiveCustomSubject(s.id, session.accessToken);
+                      setSubjects((current) => current.filter((item) => item.id !== s.id));
+                    }}
+                  >
+                    Archive
+                  </span>
+                )}
+              </div>
             ))}
-            <button className="px-5 py-3 rounded-xl border-2 border-dashed border-border-subtle text-[14px] text-text-gold-deep font-bold hover:bg-gold-500/5 hover:border-gold-500/30 transition-all">+ Add Module</button>
           </div>
+          <div className="mt-4 flex gap-3">
+            <input value={customName} onChange={(event) => setCustomName(event.target.value)} placeholder="Create a custom subject" className="flex-1 h-12 px-4 rounded-xl border border-border-subtle bg-bg-surface" />
+            <button onClick={addSubject} className="px-5 rounded-xl bg-text-gold-deep text-white font-bold">Add</button>
+          </div>
+          {subjectError && <p className="mt-3 text-[13px] text-semantic-error">{subjectError}</p>}
         </section>
 
         <section>

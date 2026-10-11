@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 
 
@@ -21,11 +22,26 @@ class Subject(models.Model):
     category = models.CharField(max_length=50, choices=CATEGORIES, default="science")
     is_active = models.BooleanField(default=True)
     order = models.PositiveIntegerField(default=0)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="owned_subjects",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=[("active", "Active"), ("archived", "Archived")],
+        default="active",
+    )
+    experience_level = models.CharField(max_length=20, blank=True)
+    learning_goal = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "subjects"
         ordering = ["order", "name"]
+        indexes = [models.Index(fields=["owner", "status"], name="subject_owner_status")]
 
     def __str__(self):
         return self.name

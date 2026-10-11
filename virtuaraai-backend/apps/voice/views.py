@@ -101,6 +101,7 @@ class VoiceTurnView(APIView):
             subject_id=request.data.get("subject_id"),
             subject_slug=(request.data.get("subject_slug") or ""),
             legacy_subject=(request.data.get("subject") or ""),
+            user=request.user,
         )
         if subject_error:
             return Response(subject_error, status=400)

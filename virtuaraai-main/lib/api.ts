@@ -96,6 +96,24 @@ export interface DjangoSubject {
   description: string;
   order: number;
   module_count: number;
+  is_custom?: boolean;
+}
+
+export interface LearnerProfile {
+  full_name: string;
+  email: string;
+  age_group: string;
+  learning_goal: string;
+  level: string;
+  subjects: Array<{ id: string; name: string; slug: string; icon?: string; is_custom?: boolean }>;
+}
+
+export function getProfile(token?: string) {
+  return api.get<LearnerProfile>("/api/v1/auth/profile/", token);
+}
+
+export function followSubject(subjectId: string, token?: string) {
+  return api.post<DjangoSubject>("/api/v1/subjects/follow/", { subject_id: subjectId }, token);
 }
 
 export function getSubjects(token?: string) {
@@ -104,6 +122,34 @@ export function getSubjects(token?: string) {
 
 export function getSubject(slug: string, token?: string) {
   return api.get<DjangoSubject>(`/api/v1/subjects/${slug}/`, token);
+}
+
+export function createCustomSubject(
+  data: { name: string; description?: string; level?: string; learning_goal?: string },
+  token?: string
+) {
+  return api.post<DjangoSubject>("/api/v1/subjects/custom/", data, token);
+}
+
+export function archiveCustomSubject(id: string, token?: string) {
+  return api.patch<DjangoSubject>(`/api/v1/subjects/custom/${id}/`, { status: "archived" }, token);
+}
+
+export async function uploadKnowledgeSource(
+  file: File,
+  options: { token?: string; subjectId?: string; saveToSubject?: boolean; conversationId?: string }
+) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("save_to_subject", options.saveToSubject ? "true" : "false");
+  if (options.subjectId) body.append("subject_id", options.subjectId);
+  if (options.conversationId) body.append("conversation_id", options.conversationId);
+  const headers: Record<string, string> = {};
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const response = await fetch(`${BASE}/api/v1/knowledge/sources/`, { method: "POST", headers, body });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw { status: response.status, message: payload.error || "Upload failed." } as ApiError;
+  return payload as { id: string; title: string; status: string; error: string; scope: string };
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────────

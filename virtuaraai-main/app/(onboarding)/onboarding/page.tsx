@@ -35,6 +35,8 @@ export default function OnboardingPage() {
   const [ageGroup, setAgeGroup] = useState("");
   const [goal, setGoal] = useState("");
   const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
+  const [customSubjects, setCustomSubjects] = useState<string[]>([]);
+  const [customSubject, setCustomSubject] = useState("");
   const [selectedLevel, setSelectedLevel] = useState("");
 
   // Redirect already-onboarded users straight to dashboard
@@ -77,7 +79,16 @@ export default function OnboardingPage() {
       if (accessToken) {
         await api.post(
           "/api/v1/auth/onboarding/",
-          { age_group: ageGroup, learning_goal: goal, level: selectedLevel, subject_ids: subjectIds },
+          {
+            full_name: name.trim(),
+            age_group: ageGroup,
+            learning_goal: goal,
+            level: selectedLevel,
+            subject_ids: subjectIds,
+            custom_subjects: customSubject.trim().length >= 2 && !customSubjects.some((item) => item.toLowerCase() === customSubject.trim().toLowerCase())
+              ? [...customSubjects, customSubject.trim()]
+              : customSubjects,
+          },
           accessToken
         );
       }
@@ -88,6 +99,14 @@ export default function OnboardingPage() {
       localStorage.setItem(`onboarding_${email}`, "true");
       router.push("/dashboard");
     }
+  };
+
+  const addCustomSubject = () => {
+    const typed = customSubject.trim();
+    if (typed.length < 2) return;
+    const exists = [...subjects, ...customSubjects].some((item) => item.toLowerCase() === typed.toLowerCase());
+    if (!exists) setCustomSubjects((current) => [...current, typed]);
+    setCustomSubject("");
   };
 
   const toggleSubject = (s: string) => {
@@ -194,11 +213,11 @@ export default function OnboardingPage() {
                     </select>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-[13px] font-bold text-text-tertiary uppercase tracking-wider ml-1">Learning Goal</label>
+                    <label className="text-[13px] font-bold text-text-tertiary uppercase tracking-wider ml-1">About you</label>
                     <textarea 
                       value={goal}
                       onChange={(e) => setGoal(e.target.value)}
-                      placeholder="What do you want to achieve with Virtuara AI?"
+                      placeholder="A short description about you and what you want to learn"
                       className="w-full h-[120px] p-5 bg-bg-elevated border border-border-default rounded-xl focus:border-border-mauve outline-none transition-all resize-none placeholder:text-text-placeholder"
                     />
                   </div>
@@ -250,6 +269,35 @@ export default function OnboardingPage() {
                     );
                   })}
                 </div>
+                {customSubjects.length > 0 && (
+                  <div className="mt-6 flex flex-wrap gap-3">
+                    {customSubjects.map((subjectName) => (
+                      <button
+                        key={subjectName}
+                        type="button"
+                        onClick={() => setCustomSubjects((current) => current.filter((item) => item !== subjectName))}
+                        className="h-[58px] px-4 rounded-xl border border-border-mauve bg-gradient-soft text-[14px] font-bold"
+                      >
+                        {subjectName} ×
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-6 flex gap-3">
+                  <input
+                    value={customSubject}
+                    onChange={(event) => setCustomSubject(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addCustomSubject();
+                      }
+                    }}
+                    placeholder="Type a subject such as Python, then press Enter"
+                    className="flex-1 h-14 px-5 bg-bg-elevated border border-border-default rounded-xl outline-none"
+                  />
+                  <button type="button" onClick={addCustomSubject} className="h-14 px-5 rounded-xl bg-text-gold-deep text-white font-bold">Add</button>
+                </div>
 
                 <div className="flex items-center justify-between mt-16">
                   <button onClick={prevStep} className="flex items-center gap-2 text-text-tertiary hover:text-text-primary transition-colors font-medium">
@@ -257,7 +305,7 @@ export default function OnboardingPage() {
                   </button>
                   <GlowButton 
                     onClick={nextStep} 
-                    disabled={selectedSubjects.length === 0}
+                    disabled={selectedSubjects.length === 0 && customSubjects.length === 0}
                     variant="primary" 
                     className="px-8"
                   >

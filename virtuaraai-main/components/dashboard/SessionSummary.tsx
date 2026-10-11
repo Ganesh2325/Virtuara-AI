@@ -3,6 +3,7 @@
 import { motion } from "framer-motion";
 import { X, Clock, MessageSquare, CheckCircle2, Brain, ArrowRight } from "lucide-react";
 import { useEffect, useState, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import GlowButton from "@/components/shared/GlowButton";
 
@@ -14,6 +15,7 @@ interface SessionSummaryProps {
 
 export default function SessionSummary({ isOpen, onClose, userName = "Learner" }: SessionSummaryProps) {
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
   const [xp, setXp] = useState(0);
   const targetXp = 240;
   const duration = 1200; // 1.2s
@@ -30,6 +32,10 @@ export default function SessionSummary({ isOpen, onClose, userName = "Learner" }
   };
 
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
     if (isOpen) {
       setXp(0);
       startTimeRef.current = null;
@@ -42,24 +48,36 @@ export default function SessionSummary({ isOpen, onClose, userName = "Learner" }
     };
   }, [isOpen]);
 
-  if (!isOpen) return null;
+  if (!isOpen || !mounted) return null;
 
-  return (
-    <div className="absolute inset-0 z-[100] flex items-center justify-center p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 sm:p-8">
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="absolute inset-0 bg-bg-page/40 backdrop-blur-md"
+        className="absolute inset-0 bg-black/45 backdrop-blur-sm"
         onClick={onClose}
       />
       
       <motion.div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-summary-title"
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="relative w-full max-w-lg bg-bg-elevated border border-border-subtle rounded-[32px] shadow-2xl overflow-hidden p-10 flex flex-col items-center text-center"
+        className="relative w-full max-w-lg max-h-[min(92vh,860px)] bg-bg-elevated border border-border-subtle rounded-[32px] shadow-2xl overflow-hidden flex flex-col"
       >
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close session summary"
+          className="absolute top-4 right-4 z-30 flex h-10 w-10 items-center justify-center rounded-full bg-red-600 text-white shadow-lg hover:bg-red-700"
+        >
+          <X className="w-5 h-5" strokeWidth={2.5} />
+        </button>
+        <div className="overflow-y-auto p-10 pt-14 flex flex-col items-center text-center">
         {/* Confetti shower */}
         <div className="absolute inset-0 pointer-events-none overflow-hidden">
           {[...Array(12)].map((_, i) => (
@@ -79,10 +97,10 @@ export default function SessionSummary({ isOpen, onClose, userName = "Learner" }
 
         {/* Header */}
         <header className="mb-8 relative z-10">
-          <h2 className="font-display font-semibold text-[36px] text-text-heading leading-tight mb-2">
+          <h2 id="session-summary-title" className="font-display font-semibold text-[36px] text-text-heading leading-tight mb-2">
             Great Session, {userName}!
           </h2>
-          <p className="text-text-secondary text-[15px] font-light">Here's what you accomplished today.</p>
+          <p className="text-text-secondary text-[15px] font-light">Here&apos;s what you accomplished today.</p>
         </header>
 
         {/* Stats Grid */}
@@ -119,14 +137,8 @@ export default function SessionSummary({ isOpen, onClose, userName = "Learner" }
             End for Today
           </button>
         </div>
+        </div>
 
-        {/* Close Button */}
-        <button 
-          onClick={onClose}
-          className="absolute top-6 right-6 p-2 text-text-tertiary hover:text-text-primary transition-colors z-20"
-        >
-          <X className="w-5 h-5" />
-        </button>
       </motion.div>
 
       <style jsx>{`
@@ -139,7 +151,8 @@ export default function SessionSummary({ isOpen, onClose, userName = "Learner" }
           z-index: 5;
         }
       `}</style>
-    </div>
+    </div>,
+    document.body
   );
 }
 

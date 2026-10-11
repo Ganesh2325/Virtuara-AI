@@ -20,7 +20,7 @@ import {
   Compass,
   Loader2,
 } from "lucide-react";
-import { getSubjects, type DjangoSubject } from "@/lib/api";
+import { createCustomSubject, followSubject, getProfile, getSubjects, type DjangoSubject } from "@/lib/api";
 import { useAria } from "@/components/aria/AriaProvider";
 
 // Map Django category slugs → display labels
@@ -58,16 +58,39 @@ export default function SubjectsPage() {
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<Category>("All");
   const [subjects, setSubjects] = useState<DjangoSubject[]>([]);
+  const [catalog, setCatalog] = useState<DjangoSubject[]>([]);
+  const [customName, setCustomName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const token = session?.accessToken;
-    getSubjects(token)
-      .then(setSubjects)
-      .catch(() => setError("Could not load subjects. Is the backend running?"))
+    Promise.all([
+      token ? getProfile(token).catch(() => null) : Promise.resolve(null),
+      getSubjects(token),
+    ]).then(([profile, available]) => {
+      const mine = profile?.subjects?.length
+        ? available.filter((subject) => profile.subjects.some((item) => item.id === subject.id))
+        : available.filter((subject) => !subject.is_custom);
+      setSubjects(mine.length ? mine : available.filter((subject) => !subject.is_custom));
+      setCatalog(available.filter((subject) => !subject.is_custom));
+    }).catch(() => setError("Could not load subjects. Is the backend running?"))
       .finally(() => setLoading(false));
   }, [session]);
+
+  const addCustom = async () => {
+    const name = customName.trim();
+    if (name.length < 2 || !session?.accessToken) return;
+    const created = await createCustomSubject({ name }, session.accessToken);
+    setSubjects((current) => current.some((item) => item.id === created.id) ? current : [...current, created]);
+    setCustomName("");
+  };
+
+  const addCatalogSubject = async (subject: DjangoSubject) => {
+    if (!session?.accessToken) return;
+    await followSubject(subject.id, session.accessToken);
+    setSubjects((current) => current.some((item) => item.id === subject.id) ? current : [...current, subject]);
+  };
 
   const filteredSubjects = subjects.filter((s) => {
     const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase());
@@ -122,7 +145,26 @@ export default function SubjectsPage() {
                 className="w-full h-16 pl-14 pr-8 bg-bg-surface border border-border-subtle rounded-[24px] text-[17px] font-bold outline-none focus:border-gold-500/50 focus:shadow-sm transition-all shadow-sm placeholder:text-text-tertiary"
               />
             </div>
+            <div className="mt-4 flex gap-3">
+              <input
+                value={customName}
+                onChange={(event) => setCustomName(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void addCustom(); } }}
+                placeholder="Add your own subject"
+                className="flex-1 h-14 px-5 bg-bg-surface border border-border-subtle rounded-xl text-[15px] font-bold outline-none"
+              />
+              <button type="button" onClick={() => void addCustom()} className="h-14 px-6 rounded-xl bg-text-gold-deep text-white font-bold">Add</button>
+            </div>
           </div>
+          {catalog.some((subject) => !subjects.some((mine) => mine.id === subject.id)) && (
+            <div className="flex flex-wrap justify-center gap-2">
+              {catalog.filter((subject) => !subjects.some((mine) => mine.id === subject.id)).map((subject) => (
+                <button key={subject.id} type="button" onClick={() => void addCatalogSubject(subject)} className="px-4 py-2 rounded-xl border border-dashed border-border-subtle text-[13px] font-bold text-text-secondary">
+                  + {subject.name}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center justify-center gap-2.5">
             {CATEGORIES.map((cat) => (

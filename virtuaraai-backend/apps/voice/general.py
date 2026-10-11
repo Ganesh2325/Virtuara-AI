@@ -9,10 +9,12 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 
+from apps.knowledge.retrieve import citations, evidence_prompt, retrieve_chunks
 from apps.sessions.providers import (
     ProviderRateLimited,
     ProviderResponseError,
     ProviderTimeout,
+    ProviderResult,
     ProviderUnavailable,
     get_text_provider,
 )
@@ -20,6 +22,7 @@ from apps.subjects.models import LearningObjective, Subject
 from apps.voice.models import GeneralConversation, GeneralTurn, ProviderUsage
 from apps.voice.responses import (
     ResponsePolicy,
+    attach_requested_diagram,
     parse_structured_response,
     response_contract_prompt,
     select_response_policy,
@@ -46,9 +49,26 @@ def _learner_context(user) -> str:
         profile = user.profile
     except (AttributeError, ObjectDoesNotExist):
         return "The learner's level is not specified."
-    level = profile.level or "unspecified"
+    level = (profile.level or "unspecified").strip().lower()
     goal = (profile.learning_goal or "").strip()[:300]
-    return f"Learner level: {level}." + (f" Learning goal: {goal}." if goal else "")
+    if level == "beginner":
+        teaching = (
+            "This learner selected Beginner. Use everyday words, explain one idea, and give a familiar example. "
+            "Do not assume prior study or use unexplained technical terms."
+        )
+    elif level == "intermediate":
+        teaching = (
+            "This learner selected Intermediate. Use correct subject terminology and explain it briefly. "
+            "Do not reduce the answer to a children's explanation."
+        )
+    elif level == "advanced":
+        teaching = (
+            "This learner selected Advanced. Answer at an advanced level with precise terminology and the important distinction. "
+            "Do not oversimplify or start from a beginner definition unless asked."
+        )
+    else:
+        teaching = "The learner's level is not specified. Use clear, direct language."
+    return teaching + (f" About the learner: {goal}." if goal else "")
 
 
 def _curriculum_context(subject: Subject | None) -> str:
@@ -88,6 +108,11 @@ def _system_prompt(*, subject: Subject | None, topic: str, user, policy: Respons
     )
 
 
+def _evidence_for(user, subject, conversation, content: str):
+    chunks = retrieve_chunks(user=user, query=content, subject=subject, conversation=conversation)
+    return chunks, evidence_prompt(chunks), citations(chunks)
+
+
 def bounded_messages(
     conversation: GeneralConversation,
     content: str,
@@ -112,6 +137,7 @@ def bounded_messages(
         selected.append(turn)
         used += size
     selected.reverse()
+    _, evidence, _ = _evidence_for(user, subject, conversation, content)
     messages = [{
         "role": "system",
         "content": _system_prompt(
@@ -119,7 +145,7 @@ def bounded_messages(
             topic=conversation.topic,
             user=user,
             policy=policy,
-        ),
+        ) + (("\n\n" + evidence) if evidence else ""),
     }]
     for turn in selected:
         messages.extend(
@@ -132,10 +158,12 @@ def bounded_messages(
     return messages
 
 
-def resolve_subject(*, subject_id=None, subject_slug: str = "", legacy_subject: str = "") -> tuple[Subject | None, dict | None]:
+def resolve_subject(*, subject_id=None, subject_slug: str = "", legacy_subject: str = "", user=None) -> tuple[Subject | None, dict | None]:
+    from apps.subjects.access import visible_subjects
+
     slug = (subject_slug or "").strip()[:120]
     legacy = (legacy_subject or "").strip()[:200]
-    query = Subject.objects.filter(is_active=True)
+    query = visible_subjects(user)
     by_id = None
     by_slug = None
     try:
@@ -257,6 +285,30 @@ def _turn_payload(turn: GeneralTurn, *, duplicate: bool = False) -> dict:
     return payload
 
 
+def recall_contract(conversation: GeneralConversation, content: str) -> dict | None:
+    """Answer explicit history questions from stored turns instead of model memory."""
+    lowered = content.lower()
+    asks_question = any(phrase in lowered for phrase in ("first question", "at the beginning", "original question"))
+    asks_answer = any(phrase in lowered for phrase in ("original answer", "first answer"))
+    if not asks_question and not asks_answer:
+        return None
+    first = conversation.turns.order_by("created_at").first()
+    if first is None:
+        spoken = "This conversation does not have an earlier question yet."
+    elif asks_answer and not asks_question:
+        spoken = f"The first answer was: {first.assistant_text}"
+    else:
+        spoken = f'Your first question was: "{first.user_text}"'
+    return {
+        "spoken_text": spoken,
+        "display_blocks": [{"type": "paragraph", "text": spoken}],
+        "follow_up": None,
+        "sources": [],
+        "response_mode": "concise",
+        "memory": "conversation_history",
+    }
+
+
 def _prepare_conversation(
     *,
     user,
@@ -270,6 +322,7 @@ def _prepare_conversation(
         subject_id=subject_id,
         subject_slug=subject_slug,
         legacy_subject=legacy_subject,
+        user=user,
     )
     if subject_error:
         return 400, None, None, False, subject_error
@@ -359,60 +412,67 @@ def general_turn(
     if duplicate is not None:
         return 200, _turn_payload(duplicate, duplicate=True)
 
-    provider = get_text_provider()
-    if not provider.configured:
-        if created_new and not conversation.turns.exists():
-            conversation.delete()
-        message = getattr(
-            provider,
-            "reason",
-            "No server-side text-generation provider is configured.",
-        )
-        return 503, {
-            "error": "ai_provider_unavailable",
-            "recoverable": True,
-            "heard": content,
-            "spoken_text": None,
-            "message": f"{message} Your message was not added to conversation history.",
-            "provider": provider.name,
-        }
-
     policy = select_response_policy(content, requested_mode)
     context = _subject_context(resolved_subject, conversation.topic)
-    messages = bounded_messages(
-        conversation,
-        content,
-        subject=resolved_subject,
-        user=user,
-        policy=policy,
-    )
-    try:
-        result, contract = _generate_contract(
-            provider,
-            messages,
-            policy,
-            context,
-            stream=False,
-        )
-    except ProviderUnavailable as exc:
-        ProviderUsage.objects.create(
+    memory = recall_contract(conversation, content)
+    if memory is not None:
+        result = ProviderResult(memory["spoken_text"], "conversation-memory", "durable-history")
+        contract = attach_requested_diagram(content, {**memory, "subject_context": context})
+    else:
+        provider = get_text_provider()
+        if not provider.configured:
+            if created_new and not conversation.turns.exists():
+                conversation.delete()
+            message = getattr(
+                provider,
+                "reason",
+                "No server-side text-generation provider is configured.",
+            )
+            return 503, {
+                "error": "ai_provider_unavailable",
+                "recoverable": True,
+                "heard": content,
+                "spoken_text": None,
+                "message": f"{message} Your message was not added to conversation history.",
+                "provider": provider.name,
+            }
+
+        messages = bounded_messages(
+            conversation,
+            content,
+            subject=resolved_subject,
             user=user,
-            conversation=conversation if conversation.pk else None,
-            correlation_id=client_turn_id,
-            provider=exc.provider,
-            model=getattr(provider, "model", ""),
-            status=_usage_status(exc),
+            policy=policy,
         )
-        if created_new and not conversation.turns.exists():
-            conversation.delete()
-        return 503, {
-            "error": _usage_status(exc),
-            "recoverable": True,
-            "heard": content,
-            "spoken_text": None,
-            "message": exc.reason,
-            "provider": exc.provider,
-        }
+        try:
+            result, contract = _generate_contract(
+                provider,
+                messages,
+                policy,
+                context,
+                stream=False,
+            )
+        except ProviderUnavailable as exc:
+            ProviderUsage.objects.create(
+                user=user,
+                conversation=conversation if conversation.pk else None,
+                correlation_id=client_turn_id,
+                provider=exc.provider,
+                model=getattr(provider, "model", ""),
+                status=_usage_status(exc),
+            )
+            if created_new and not conversation.turns.exists():
+                conversation.delete()
+            return 503, {
+                "error": _usage_status(exc),
+                "recoverable": True,
+                "heard": content,
+                "spoken_text": None,
+                "message": exc.reason,
+                "provider": exc.provider,
+            }
+        _, _, source_citations = _evidence_for(user, resolved_subject, conversation, content)
+        contract = attach_requested_diagram(content, {**contract, "sources": source_citations})
 
     try:
         with transaction.atomic():
@@ -486,8 +546,11 @@ def general_stream(
     if conversation_error:
         return code, conversation_error
 
-    provider = get_text_provider()
-    if not provider.configured:
+    policy = select_response_policy(content, requested_mode)
+    context = _subject_context(resolved_subject, conversation.topic)
+    memory = recall_contract(conversation, content)
+    provider = None if memory is not None else get_text_provider()
+    if memory is None and not provider.configured:
         if created_new:
             conversation.delete()
         message = getattr(
@@ -501,8 +564,6 @@ def general_stream(
             "message": f"{message} Your message was not added to conversation history.",
             "provider": provider.name,
         }
-    policy = select_response_policy(content, requested_mode)
-    context = _subject_context(resolved_subject, conversation.topic)
     messages = bounded_messages(
         conversation,
         content,
@@ -514,13 +575,19 @@ def general_stream(
     def events():
         yield {"type": "conversation", "conversation_id": str(conversation.id)}
         try:
-            result, contract = _generate_contract(
-                provider,
-                messages,
-                policy,
-                context,
-                stream=True,
-            )
+            if memory is not None:
+                result = ProviderResult(memory["spoken_text"], "conversation-memory", "durable-history")
+                contract = attach_requested_diagram(content, {**memory, "subject_context": context})
+            else:
+                result, contract = _generate_contract(
+                    provider,
+                    messages,
+                    policy,
+                    context,
+                    stream=True,
+                )
+                _, _, source_citations = _evidence_for(user, resolved_subject, conversation, content)
+                contract = attach_requested_diagram(content, {**contract, "sources": source_citations})
         except ProviderUnavailable as exc:
             ProviderUsage.objects.create(
                 user=user,

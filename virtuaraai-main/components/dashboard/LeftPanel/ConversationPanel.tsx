@@ -2,10 +2,10 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Mic, MicOff, RefreshCw, Brain, MessageSquare, Briefcase } from "lucide-react";
+import { Send, Mic, MicOff, RefreshCw, Brain, MessageSquare, Briefcase, Paperclip } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { getObjectives, createSession, beginSession, submitTurn, completeSession } from "@/lib/api";
+import { getObjectives, createSession, beginSession, submitTurn, completeSession, uploadKnowledgeSource } from "@/lib/api";
 import { useAria, type AriaDisplayBlock } from "@/components/aria/AriaProvider";
 
 interface Message {
@@ -14,6 +14,7 @@ interface Message {
   content: string;
   blocks?: AriaDisplayBlock[];
   followUp?: string | null;
+  sources?: { title?: string; snippet?: string }[];
   timestamp: string;
 }
 
@@ -29,7 +30,7 @@ function errorMessage(error: unknown) {
 
 function isDisplayBlock(value: unknown): value is AriaDisplayBlock {
   if (!value || typeof value !== "object" || !("type" in value)) return false;
-  return ["paragraph", "emphasis", "list", "numbered_steps", "code", "math", "table"]
+  return ["paragraph", "emphasis", "list", "numbered_steps", "code", "math", "table", "diagram"]
     .includes(String((value as { type?: unknown }).type));
 }
 
@@ -74,6 +75,21 @@ function DisplayBlocks({ blocks }: { blocks: AriaDisplayBlock[] }) {
             </div>
           );
         }
+        if (block.type === "diagram") {
+          return (
+            <div key={index} className="rounded-xl border border-border-subtle bg-bg-overlay/40 p-3" aria-label={block.alt || block.title || "Diagram"}>
+              {block.title && <p className="text-[11px] font-bold uppercase tracking-wider text-text-tertiary mb-2">{block.title}</p>}
+              <div className="flex flex-col items-stretch gap-1">
+                {block.nodes.map((node, nodeIndex) => (
+                  <div key={`${node}-${nodeIndex}`}>
+                    <div className="rounded-lg border border-border-gold bg-bg-surface px-3 py-2 text-[13px] text-text-heading">{node}</div>
+                    {nodeIndex < block.nodes.length - 1 && <div className="py-1 text-center text-text-gold-deep">↓</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        }
         if (block.type === "table") {
           return (
             <div key={index} className="overflow-x-auto rounded-xl border border-border-subtle">
@@ -115,6 +131,13 @@ function MessageBubble({ msg }: { msg: Message }) {
         >
           {msg.blocks?.length ? <DisplayBlocks blocks={msg.blocks} /> : cleanCompatibilityText(msg.content)}
           {msg.followUp && <p className="mt-3 pt-3 border-t border-border-subtle font-semibold text-text-secondary">{msg.followUp}</p>}
+          {!!msg.sources?.length && (
+            <div className="mt-3 pt-3 border-t border-border-subtle space-y-1">
+              {msg.sources.map((source, index) => (
+                <p key={`${source.title}-${index}`} className="text-[11px] text-text-tertiary">Source: {source.title}{source.snippet ? ` — ${source.snippet}` : ""}</p>
+              ))}
+            </div>
+          )}
         </div>
         <p className="text-[10px] mt-2 px-1 font-mono text-text-tertiary uppercase tracking-wider font-bold">
           {msg.timestamp}
@@ -158,6 +181,10 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState("");
+  const [attachmentName, setAttachmentName] = useState("");
+  const [saveToSubject, setSaveToSubject] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [teachingActive, setTeachingActive] = useState(false);
@@ -273,7 +300,10 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
         ? turn.body.display_blocks.filter(isDisplayBlock)
         : undefined;
       const followUp = typeof turn.body.follow_up === "string" ? turn.body.follow_up : null;
-      const reply: Message = { id: Date.now() + 1, role: "ai", content: displayText, blocks, followUp, timestamp: nowStr() };
+      const sources = Array.isArray(turn.body.sources)
+        ? turn.body.sources.filter((source): source is { title?: string; snippet?: string } => !!source && typeof source === "object")
+        : undefined;
+      const reply: Message = { id: Date.now() + 1, role: "ai", content: displayText, blocks, followUp, sources, timestamp: nowStr() };
       setMessages((prev) => {
         if (turn.inputModality === "text") return [...prev, reply];
         const heard: Message = { id: Date.now(), role: "user", content: turn.heard, timestamp: nowStr() };
@@ -384,6 +414,24 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     setMode(m);
   };
 
+  const attachFile = async (file: File | undefined) => {
+    if (!file || !accessToken) return;
+    setUploading(true);
+    setError("");
+    try {
+      const saved = await uploadKnowledgeSource(file, {
+        token: accessToken,
+        subjectId: selectedSubject?.id,
+        saveToSubject,
+      });
+      setAttachmentName(`${saved.title} · ${saved.scope === "subject" ? "saved to subject" : "this chat only"}`);
+    } catch (uploadError) {
+      setError(errorMessage(uploadError));
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
@@ -474,7 +522,24 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
 
       {/* Input */}
       <div className="px-6 py-5 bg-bg-surface/60 backdrop-blur-md border-t border-border-default relative z-20">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <label className="flex items-center gap-2 text-[11px] font-bold text-text-secondary">
+            <input type="checkbox" checked={saveToSubject} onChange={(event) => setSaveToSubject(event.target.checked)} />
+            Save upload to {subject}
+          </label>
+          {attachmentName && <span className="truncate text-[11px] text-text-tertiary">{uploading ? "Indexing…" : attachmentName}</span>}
+        </div>
         <div className="flex items-end gap-[12px]">
+          <input ref={fileRef} type="file" accept=".pdf,.txt,.md,.csv,text/plain" className="hidden" onChange={(event) => { void attachFile(event.target.files?.[0]); event.target.value = ""; }} />
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            title="Attach a document"
+            disabled={uploading || !accessToken}
+            className="w-[46px] h-[46px] rounded-full flex items-center justify-center flex-shrink-0 border border-border-subtle bg-bg-overlay text-text-tertiary disabled:opacity-40"
+          >
+            <Paperclip className="w-[18px] h-[18px]" />
+          </button>
           <button
             onClick={toggleListening}
             title={listening ? "Stop listening" : "Start voice input"}

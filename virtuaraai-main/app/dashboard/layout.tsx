@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Bell, ChevronDown, LogOut, Settings, User as UserIcon, LayoutDashboard, History, BookOpen, Trophy, ChevronRight, Briefcase } from "lucide-react";
 import Link from "next/link";
 import NotificationDropdown from "@/components/dashboard/NotificationDropdown";
-import { getSessionStats, getSubjects } from "@/lib/api";
+import { getProfile, getSessionStats, getSubjects } from "@/lib/api";
 import { AriaProvider, useAria } from "@/components/aria/AriaProvider";
 
 export default function DashboardLayout({
@@ -34,7 +34,8 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
     const token = session?.accessToken;
     if (!token) return;
     let cancelled = false;
-    getSubjects(token).then((subjects) => {
+    Promise.all([getProfile(token).catch(() => null), getSubjects(token)]).then(([profile, catalog]) => {
+      const subjects = profile?.subjects?.length ? profile.subjects : catalog;
       if (cancelled || subjects.length === 0) return;
       const requested = new URLSearchParams(window.location.search).get("subject");
       const stored = localStorage.getItem("virtuara_active_subject");

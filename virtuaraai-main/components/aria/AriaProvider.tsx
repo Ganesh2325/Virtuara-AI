@@ -19,7 +19,8 @@ export type AriaDisplayBlock =
   | { type: "list" | "numbered_steps"; items: string[] }
   | { type: "code"; language?: string; code: string }
   | { type: "math"; expression: string; label?: string }
-  | { type: "table"; columns: string[]; rows: string[][] };
+  | { type: "table"; columns: string[]; rows: string[][] }
+  | { type: "diagram"; title?: string; alt?: string; nodes: string[] };
 
 export type AriaTask = {
   kind: AriaKind;

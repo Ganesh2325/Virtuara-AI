@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from apps.sessions.providers import ProviderResponseError
 
 RESPONSE_MODES = {"concise", "simple", "detailed", "steps", "code", "yes_no"}
-BLOCK_TYPES = {"paragraph", "list", "numbered_steps", "emphasis", "code", "math", "table"}
+BLOCK_TYPES = {"paragraph", "list", "numbered_steps", "emphasis", "code", "math", "table", "diagram"}
 MAX_BLOCKS = 12
 
 
@@ -166,6 +166,13 @@ def _normalize_block(raw: object) -> dict | None:
         if not clean_rows:
             return None
         return {"type": "table", "columns": columns, "rows": clean_rows}
+    if block_type == "diagram":
+        nodes = _clean_items(raw.get("nodes"), max_items=6)
+        title = clean_plain_text(raw.get("title"), limit=120) or "Diagram"
+        alt = clean_plain_text(raw.get("alt"), limit=300) or "Structured explanation diagram."
+        if len(nodes) < 2:
+            return None
+        return {"type": "diagram", "title": title, "alt": alt, "nodes": nodes}
     return None
 
 
@@ -183,7 +190,35 @@ def _spoken_from_blocks(blocks: list[dict]) -> str:
             parts.append(block.get("label") or block["expression"])
         elif block_type == "table":
             parts.append("I included a comparison table in the chat.")
+        elif block_type == "diagram":
+            parts.append(block.get("alt") or "I included a simple diagram in the chat.")
     return clean_plain_text(" ".join(parts), limit=1200)
+
+
+def attach_requested_diagram(content: str, contract: dict) -> dict:
+    """Add a safe structured diagram when the learner explicitly asks for one."""
+    if not re.search(r"\b(diagram|flowchart|flow chart|mind map|visual)\b", content, re.IGNORECASE):
+        return contract
+    if any(block.get("type") == "diagram" for block in contract.get("display_blocks") or []):
+        return contract
+    sentences = []
+    for block in contract.get("display_blocks") or []:
+        if block.get("type") in {"paragraph", "emphasis"} and block.get("text"):
+            sentences.extend(part.strip() for part in re.split(r"[.!?]", block["text"]) if part.strip())
+        elif block.get("type") in {"list", "numbered_steps"}:
+            sentences.extend(block.get("items") or [])
+    nodes = [clean_plain_text(item, limit=140) for item in sentences[:5]]
+    nodes = [item for item in nodes if item]
+    if len(nodes) < 2:
+        return contract
+    blocks = list(contract.get("display_blocks") or [])
+    blocks.append({
+        "type": "diagram",
+        "title": "Explanation diagram",
+        "alt": "A simple sequence based on this explanation.",
+        "nodes": nodes,
+    })
+    return {**contract, "display_blocks": blocks[:MAX_BLOCKS]}
 
 
 def parse_structured_response(
