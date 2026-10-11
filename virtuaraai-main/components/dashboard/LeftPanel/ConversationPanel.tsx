@@ -254,6 +254,20 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
     return registerHandler((turn) => {
       if (!["general", "learning", "quiz"].includes(turn.context)) return;
       const replyText = turn.spokenText ?? (typeof turn.body.message === "string" ? turn.body.message : "Aria did not produce a reply.");
+      if (!turn.ok) {
+        if (turn.inputModality === "speech") {
+          const heard: Message = {
+            id: Date.now(),
+            role: "user",
+            content: turn.heard,
+            timestamp: nowStr(),
+          };
+          setMessages((prev) => [...prev, heard]);
+        }
+        setError(replyText);
+        setIsTyping(false);
+        return;
+      }
       const displayText = typeof turn.body.response_text === "string" ? turn.body.response_text : replyText;
       const blocks = Array.isArray(turn.body.display_blocks)
         ? turn.body.display_blocks.filter(isDisplayBlock)
@@ -265,7 +279,6 @@ export default function ConversationPanel({ onAISpeak }: ConversationPanelProps)
         const heard: Message = { id: Date.now(), role: "user", content: turn.heard, timestamp: nowStr() };
         return [...prev, heard, reply];
       });
-      if (!turn.ok) setError(replyText);
       setIsTyping(false);
     });
   }, [registerHandler]);

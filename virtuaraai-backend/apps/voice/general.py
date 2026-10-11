@@ -6,7 +6,7 @@ import time
 from dataclasses import replace
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 
 from apps.sessions.providers import (
@@ -530,8 +530,6 @@ def general_stream(
                 model=getattr(provider, "model", ""),
                 status=_usage_status(exc),
             )
-            if created_new and not conversation.turns.exists():
-                conversation.delete()
             yield {
                 "type": "error",
                 "error": _usage_status(exc),
@@ -568,12 +566,47 @@ def general_stream(
                 )
             payload = _turn_payload(turn)
         except IntegrityError:
-            if not conversation.turns.exists():
-                conversation.delete()
-            turn = GeneralTurn.objects.select_related("conversation", "conversation__subject_ref").get(
+            turn = GeneralTurn.objects.select_related(
+                "conversation", "conversation__subject_ref"
+            ).filter(
                 conversation__user=user, client_turn_id=client_turn_id
-            )
+            ).first()
+            if turn is None:
+                yield {
+                    "type": "error",
+                    "error": "turn_conflict",
+                    "message": "That turn is still being finalized. Try again shortly.",
+                    "recoverable": True,
+                }
+                return
             payload = _turn_payload(turn, duplicate=True)
+        except DatabaseError:
+            try:
+                saved_conversation = (
+                    conversation
+                    if GeneralConversation.objects.filter(pk=conversation.pk).exists()
+                    else None
+                )
+                ProviderUsage.objects.create(
+                    user=user,
+                    conversation=saved_conversation,
+                    correlation_id=client_turn_id,
+                    provider=result.provider,
+                    model=result.model,
+                    status="persistence_error",
+                    prompt_tokens=result.prompt_tokens,
+                    completion_tokens=result.completion_tokens,
+                    latency_ms=result.latency_ms,
+                )
+            except DatabaseError:
+                pass
+            yield {
+                "type": "error",
+                "error": "persistence_error",
+                "message": "The response was generated but could not be saved. Please try again.",
+                "recoverable": True,
+            }
+            return
         yield {"type": "done", "payload": payload}
 
     return 200, events()

@@ -17,6 +17,80 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
+def _object_schema(properties: dict, required: list[str]) -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": required,
+    }
+
+
+_STRING_SCHEMA = {"type": "string"}
+_STRING_LIST_SCHEMA = {"type": "array", "items": _STRING_SCHEMA}
+_DISPLAY_BLOCK_SCHEMAS = [
+    _object_schema(
+        {"type": {"type": "string", "const": block_type}, "text": _STRING_SCHEMA},
+        ["type", "text"],
+    )
+    for block_type in ("paragraph", "emphasis")
+] + [
+    _object_schema(
+        {"type": {"type": "string", "const": block_type}, "items": _STRING_LIST_SCHEMA},
+        ["type", "items"],
+    )
+    for block_type in ("list", "numbered_steps")
+] + [
+    _object_schema(
+        {
+            "type": {"type": "string", "const": "code"},
+            "language": _STRING_SCHEMA,
+            "code": _STRING_SCHEMA,
+        },
+        ["type", "language", "code"],
+    ),
+    _object_schema(
+        {
+            "type": {"type": "string", "const": "math"},
+            "expression": _STRING_SCHEMA,
+            "label": _STRING_SCHEMA,
+        },
+        ["type", "expression", "label"],
+    ),
+    _object_schema(
+        {
+            "type": {"type": "string", "const": "table"},
+            "columns": _STRING_LIST_SCHEMA,
+            "rows": {
+                "type": "array",
+                "items": {"type": "array", "items": _STRING_SCHEMA},
+            },
+        },
+        ["type", "columns", "rows"],
+    ),
+]
+_ARIA_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "aria_response",
+        "strict": True,
+        "schema": _object_schema(
+            {
+                "spoken_text": _STRING_SCHEMA,
+                "display_blocks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "items": {"anyOf": _DISPLAY_BLOCK_SCHEMAS},
+                },
+                "follow_up": {"type": ["string", "null"]},
+            },
+            ["spoken_text", "display_blocks", "follow_up"],
+        ),
+    },
+}
+
+
 class ProviderUnavailable(Exception):
     def __init__(self, provider: str, reason: str):
         self.provider = provider
@@ -144,7 +218,11 @@ class OpenAICompatibleTextProvider(TextProvider):
         if self.model.startswith("openai/gpt-oss"):
             payload["reasoning_effort"] = "low"
         if any("Return only one valid JSON object" in item["content"] for item in messages):
-            payload["response_format"] = {"type": "json_object"}
+            payload["response_format"] = (
+                _ARIA_RESPONSE_FORMAT
+                if self.model.startswith("openai/gpt-oss")
+                else {"type": "json_object"}
+            )
 
     def _completion_budget(self, requested_tokens: int) -> int:
         requested = max(1, min(int(requested_tokens), 1000))
@@ -181,6 +259,16 @@ class OpenAICompatibleTextProvider(TextProvider):
             if payload.get("error"):
                 error = payload.get("error") or {}
                 code = error.get("code") if isinstance(error, dict) else ""
+                failed_generation = (
+                    error.get("failed_generation", "").strip()
+                    if isinstance(error, dict) and isinstance(error.get("failed_generation"), str)
+                    else ""
+                )
+                if code == "json_validate_failed" and failed_generation:
+                    text_parts.append(failed_generation)
+                    finish_reason = "recovered"
+                    yield failed_generation
+                    continue
                 message = (
                     "The AI provider could not produce the required response format."
                     if code == "json_validate_failed"
@@ -239,6 +327,17 @@ def _request_json(url: str, *, api_key: str, timeout_seconds: float, payload: di
             except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
                 error = {}
             if isinstance(error, dict) and error.get("code") == "json_validate_failed":
+                failed_generation = error.get("failed_generation")
+                if isinstance(failed_generation, str) and failed_generation.strip():
+                    return {
+                        "choices": [
+                            {
+                                "message": {"content": failed_generation.strip()},
+                                "finish_reason": "recovered",
+                            }
+                        ],
+                        "usage": {},
+                    }
                 raise ProviderResponseError(
                     provider,
                     "The AI provider could not produce the required response format.",
@@ -279,6 +378,18 @@ def _stream_request_json(url: str, *, api_key: str, timeout_seconds: float, payl
             except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
                 error = {}
             if isinstance(error, dict) and error.get("code") == "json_validate_failed":
+                failed_generation = error.get("failed_generation")
+                if isinstance(failed_generation, str) and failed_generation.strip():
+                    yield {
+                        "choices": [
+                            {
+                                "delta": {"content": failed_generation.strip()},
+                                "finish_reason": "recovered",
+                            }
+                        ],
+                        "usage": {},
+                    }
+                    return
                 raise ProviderResponseError(
                     provider,
                     "The AI provider could not produce the required response format.",

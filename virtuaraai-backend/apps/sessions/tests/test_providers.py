@@ -146,8 +146,47 @@ class ProviderAdapterTests(SimpleTestCase):
                 )
             )
 
+    @patch("apps.sessions.providers._stream_request_json")
+    def test_failed_structured_generation_is_recovered_for_application_validation(self, stream_request):
+        recovered = (
+            '{"spoken_text":"Supply affects price.",'
+            '"display_blocks":[{"type":"paragraph","text":"Supply affects price."}],'
+            '"follow_up":null}'
+        )
+        stream_request.return_value = iter(
+            [
+                {
+                    "error": {
+                        "code": "json_validate_failed",
+                        "failed_generation": recovered,
+                    }
+                }
+            ]
+        )
+        provider = OpenAICompatibleTextProvider(
+            name="groq",
+            api_key="secret",
+            base_url="https://api.groq.com/openai/v1",
+            model="openai/gpt-oss-20b",
+            timeout_seconds=3,
+        )
+
+        stream = provider.stream_chat(
+            [{"role": "system", "content": "Return only one valid JSON object."}]
+        )
+        parts = []
+        while True:
+            try:
+                parts.append(next(stream))
+            except StopIteration as stopped:
+                result = stopped.value
+                break
+        self.assertEqual(parts, [recovered])
+        self.assertEqual(result.text, recovered)
+        self.assertEqual(result.finish_reason, "recovered")
+
     @patch("apps.sessions.providers._request_json")
-    def test_gpt_oss_reserves_reasoning_budget_and_requests_json(self, request_json):
+    def test_gpt_oss_reserves_reasoning_budget_and_requests_strict_schema(self, request_json):
         request_json.return_value = {
             "choices": [{"message": {"content": '{"answer":"ok"}'}, "finish_reason": "stop"}],
             "usage": {},
@@ -171,7 +210,12 @@ class ProviderAdapterTests(SimpleTestCase):
         payload = request_json.call_args.kwargs["payload"]
         self.assertEqual(payload["max_tokens"], 800)
         self.assertEqual(payload["reasoning_effort"], "low")
-        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        response_format = payload["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
+        block_schema = response_format["json_schema"]["schema"]["properties"]["display_blocks"]
+        self.assertEqual(block_schema["maxItems"], 12)
+        self.assertEqual(len(block_schema["items"]["anyOf"]), 7)
 
     @patch("apps.sessions.providers._request_json")
     def test_timeout_and_rate_limit_are_consistent(self, request_json):

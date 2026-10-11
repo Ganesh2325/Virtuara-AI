@@ -395,6 +395,67 @@ class VoiceRuntimeTests(APITestCase):
         self.assertTrue(GeneralTurn.objects.filter(client_turn_id="stream-retry-1").exists())
 
     @patch("apps.voice.general.get_text_provider")
+    def test_failed_stream_keeps_published_conversation_available_for_retry(self, provider_factory):
+        class Provider:
+            configured = True
+            name = "stream-provider"
+            model = "stream-model"
+            failing = True
+
+            def stream_chat(self, messages, max_tokens=500):
+                if self.failing:
+                    raise ProviderResponseError(
+                        self.name,
+                        "The AI provider could not produce the required response format.",
+                    )
+                payload = structured_response("Recovered on the next turn.")
+                yield payload
+                return ProviderResult(
+                    text=payload,
+                    provider=self.name,
+                    model=self.model,
+                )
+
+            def generate_chat(self, messages, max_tokens=500):
+                raise ProviderResponseError(
+                    self.name,
+                    "The AI provider could not produce the required response format.",
+                )
+
+        provider = Provider()
+        provider_factory.return_value = provider
+        failed = self.client.post(
+            "/api/v1/voice/general-stream/",
+            {
+                "subject_id": str(self.subject.id),
+                "subject_slug": self.subject.slug,
+                "content": "Explain inertia",
+                "client_turn_id": "stream-failed-1",
+            },
+            format="json",
+        )
+        failed_body = b"".join(failed.streaming_content).decode()
+        conversation = GeneralConversation.objects.get(user=self.learner)
+        self.assertIn('"type":"error"', failed_body)
+        self.assertEqual(conversation.turns.count(), 0)
+
+        provider.failing = False
+        retried = self.client.post(
+            "/api/v1/voice/general-stream/",
+            {
+                "conversation_id": str(conversation.id),
+                "subject_id": str(self.subject.id),
+                "subject_slug": self.subject.slug,
+                "content": "Explain inertia",
+                "client_turn_id": "stream-retry-2",
+            },
+            format="json",
+        )
+        retried_body = b"".join(retried.streaming_content).decode()
+        self.assertIn("Recovered on the next turn.", retried_body)
+        self.assertEqual(conversation.turns.count(), 1)
+
+    @patch("apps.voice.general.get_text_provider")
     def test_provider_timeout_does_not_create_a_turn(self, provider_factory):
         class Provider:
             configured = True

@@ -134,6 +134,7 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
   const requestSequenceRef = useRef(0);
   const speechSequenceRef = useRef(0);
   const transcriptRef = useRef({ text: "", at: 0 });
+  const submissionRef = useRef({ key: "", at: 0 });
 
   useEffect(() => { taskRef.current = task; }, [task]);
   useEffect(() => { tokenRef.current = token; }, [token]);
@@ -245,6 +246,22 @@ export function AriaProvider({ children }: { children: React.ReactNode }) {
   const submit = useCallback(async (heard: string, inputModality: "speech" | "text") => {
     const current = taskRef.current;
     const access = tokenRef.current;
+    const submissionKey = [
+      current.kind,
+      current.subject?.id ?? activeSubjectRef.current?.id ?? "",
+      current.learningSessionId ?? "",
+      current.interviewSessionId ?? "",
+      heard.trim().toLowerCase(),
+    ].join(":");
+    const submittedAt = Date.now();
+    if (
+      requestRef.current &&
+      submissionRef.current.key === submissionKey &&
+      submittedAt - submissionRef.current.at < 3000
+    ) {
+      return;
+    }
+    submissionRef.current = { key: submissionKey, at: submittedAt };
     const sequence = ++requestSequenceRef.current;
     requestRef.current?.abort();
     const controller = new AbortController();
